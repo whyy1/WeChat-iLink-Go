@@ -3,6 +3,7 @@ package ilink
 import (
 	"bytes"
 	"crypto/aes"
+	"crypto/md5"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
@@ -10,88 +11,113 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
+	"regexp"
 	"strings"
 )
 
+var hexKeyPattern = regexp.MustCompile("^[0-9a-fA-F]{32}$")
+
 // DownloadReceivedMedia downloads and decrypts a received media item (image/voice/file/video).
-// It constructs the CDN URL from media.encrypt_query_param and hex-decodes the aeskey field.
+// Follows the OpenClaw implementation: use encrypt_query_param + parsed media.aes_key.
 func (c *Client) DownloadReceivedMedia(item Item) ([]byte, error) {
-	var encryptQueryParam, hexKey string
+	var media *MediaContent
+	var hexKey string
 	switch item.Type {
 	case ItemTypeImage:
 		if item.ImageItem == nil || item.ImageItem.Media == nil {
 			return nil, fmt.Errorf("image item missing media info")
 		}
-		encryptQueryParam = item.ImageItem.Media.EncryptQueryParam
+		media = item.ImageItem.Media
 		hexKey = item.ImageItem.AesKeyHex
 	case ItemTypeVoice:
 		if item.VoiceItem == nil || item.VoiceItem.Media == nil {
 			return nil, fmt.Errorf("voice item missing media info")
 		}
-		encryptQueryParam = item.VoiceItem.Media.EncryptQueryParam
+		media = item.VoiceItem.Media
 		hexKey = item.VoiceItem.AesKeyHex
 	case ItemTypeFile:
 		if item.FileItem == nil || item.FileItem.Media == nil {
 			return nil, fmt.Errorf("file item missing media info")
 		}
-		encryptQueryParam = item.FileItem.Media.EncryptQueryParam
+		media = item.FileItem.Media
 		hexKey = item.FileItem.AesKeyHex
 	case ItemTypeVideo:
 		if item.VideoItem == nil || item.VideoItem.Media == nil {
 			return nil, fmt.Errorf("video item missing media info")
 		}
-		encryptQueryParam = item.VideoItem.Media.EncryptQueryParam
+		media = item.VideoItem.Media
 		hexKey = item.VideoItem.AesKeyHex
 	default:
 		return nil, fmt.Errorf("unsupported item type %d", item.Type)
 	}
 
-	return c.downloadAndDecryptHex(encryptQueryParam, hexKey)
+	cdnURLs, aesKey, err := resolveReceivedMedia(media, hexKey)
+	if err != nil {
+		return nil, err
+	}
+	var lastErr error
+	for _, cdnURL := range cdnURLs {
+		if c.Debug {
+			fmt.Fprintf(os.Stderr, "[ilink] received media type=%d cdn_url=%s\n", item.Type, cdnURL)
+		}
+		data, err := c.DownloadMedia(cdnURL, aesKey)
+		if err == nil {
+			return data, nil
+		}
+		lastErr = err
+		if c.Debug {
+			fmt.Fprintf(os.Stderr, "[ilink] received media fallback failed type=%d err=%v\n", item.Type, err)
+		}
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no download candidates for received media")
+	}
+	return nil, lastErr
 }
 
-// downloadAndDecryptHex recovers a received media file in two steps:
-//  1. Base64 (URL-safe) decode + AES-128-ECB decrypt encrypt_query_param → CDN download URL
-//  2. GET the CDN URL → AES-128-ECB decrypt the response body → plaintext file
-func (c *Client) downloadAndDecryptHex(encryptQueryParam, hexKey string) ([]byte, error) {
-	key, err := hex.DecodeString(hexKey)
-	if err != nil {
-		return nil, fmt.Errorf("decode hex key: %w", err)
+func resolveReceivedMedia(media *MediaContent, hexKey string) (cdnURLs []string, aesKey string, err error) {
+	if media == nil {
+		return nil, "", fmt.Errorf("media content is nil")
 	}
 
-	// Step 1: decrypt encrypt_query_param to get the CDN URL
-	encryptedURL, err := base64.URLEncoding.DecodeString(encryptQueryParam)
-	if err != nil {
-		return nil, fmt.Errorf("base64 decode encrypt_query_param: %w", err)
-	}
-	cdnURLBytes, err := decryptAES128ECB(encryptedURL, key)
-	if err != nil {
-		return nil, fmt.Errorf("decrypt cdn url: %w", err)
-	}
-	cdnURL := string(cdnURLBytes)
-	if !strings.HasPrefix(cdnURL, "http") {
-		cdnURL = CDNBaseURL + "?" + cdnURL
-	}
-	if c.Debug {
-		fmt.Fprintf(os.Stderr, "[ilink] cdn URL (decrypted): %s\n", cdnURL)
+	addCandidate := func(u string) {
+		u = strings.TrimSpace(u)
+		if u == "" {
+			return
+		}
+		for _, existing := range cdnURLs {
+			if existing == u {
+				return
+			}
+		}
+		cdnURLs = append(cdnURLs, u)
 	}
 
-	// Step 2: download the AES-encrypted file content
-	resp, err := c.httpClient.Get(cdnURL)
-	if err != nil {
-		return nil, fmt.Errorf("cdn download: %w", err)
+	addCandidate(media.FullURL)
+	encryptQueryParam := strings.TrimSpace(media.EncryptQueryParam)
+	if encryptQueryParam != "" {
+		addCandidate(CDNBaseURL + "/download?encrypted_query_param=" + encryptQueryParam)
+		addCandidate(CDNBaseURL + "/download?encrypted_query_param=" + url.QueryEscape(encryptQueryParam))
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("cdn download status %d", resp.StatusCode)
-	}
-	encryptedFile, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("cdn read: %w", err)
+	if len(cdnURLs) == 0 {
+		return nil, "", fmt.Errorf("missing media download url")
 	}
 
-	// Step 3: decrypt the file content with the same key
-	return decryptAES128ECB(encryptedFile, key)
+	if strings.TrimSpace(hexKey) != "" {
+		key, err := hex.DecodeString(strings.TrimSpace(hexKey))
+		if err != nil {
+			return nil, "", fmt.Errorf("decode hex key: %w", err)
+		}
+		return cdnURLs, base64.StdEncoding.EncodeToString(key), nil
+	}
+
+	aesKey = strings.TrimSpace(media.AesKey)
+	if aesKey == "" {
+		return nil, "", fmt.Errorf("missing aes key for received media")
+	}
+	return cdnURLs, aesKey, nil
 }
 
 // DownloadMedia downloads and decrypts media using a base64-encoded AES key.
@@ -113,26 +139,55 @@ func (c *Client) DownloadMedia(cdnURL, aesKey string) ([]byte, error) {
 	return DecryptMedia(encrypted, aesKey)
 }
 
+const (
+	UploadMediaTypeImage = 1
+	UploadMediaTypeVideo = 2
+	UploadMediaTypeFile  = 3
+	UploadMediaTypeVoice = 4
+)
+
 // UploadURLRequest is the body sent to /ilink/bot/getuploadurl
 type UploadURLRequest struct {
-	FileType int   `json:"file_type"`
-	FileSize int64 `json:"file_size"`
+	FileKey        string   `json:"filekey"`
+	MediaType      int      `json:"media_type"`
+	ToUserID       string   `json:"to_user_id,omitempty"`
+	RawSize        int64    `json:"rawsize"`
+	RawFileMD5     string   `json:"rawfilemd5"`
+	FileSize       int64    `json:"filesize"`
+	ThumbRawSize   int64    `json:"thumb_rawsize,omitempty"`
+	ThumbRawFileMD5 string  `json:"thumb_rawfilemd5,omitempty"`
+	ThumbFileSize  int64    `json:"thumb_filesize,omitempty"`
+	NoNeedThumb    bool     `json:"no_need_thumb,omitempty"`
+	AesKey         string   `json:"aeskey,omitempty"`
+	BaseInfo       BaseInfo `json:"base_info"`
 }
 
 // UploadURLResponse is returned by GetUploadURL
 type UploadURLResponse struct {
 	baseResponse
-	UploadURL string `json:"upload_url"`
-	CDNUrl    string `json:"cdn_url"`
-	FileKey   string `json:"file_key,omitempty"`
+	UploadParam      string `json:"upload_param"`
+	ThumbUploadParam string `json:"thumb_upload_param,omitempty"`
 }
 
-// GetUploadURL requests a CDN pre-signed upload URL for a file of the given type and encrypted size.
-func (c *Client) GetUploadURL(fileType int, fileSize int64) (*UploadURLResponse, error) {
-	data, err := c.do(http.MethodPost, "/ilink/bot/getuploadurl", UploadURLRequest{
-		FileType: fileType,
-		FileSize: fileSize,
-	})
+func mapItemTypeToUploadMediaType(itemType int) (int, error) {
+	switch itemType {
+	case ItemTypeImage:
+		return UploadMediaTypeImage, nil
+	case ItemTypeVideo:
+		return UploadMediaTypeVideo, nil
+	case ItemTypeFile:
+		return UploadMediaTypeFile, nil
+	case ItemTypeVoice:
+		return UploadMediaTypeVoice, nil
+	default:
+		return 0, fmt.Errorf("unsupported upload item type %d", itemType)
+	}
+}
+
+// GetUploadURL requests CDN upload parameters using the protocol-native payload.
+func (c *Client) GetUploadURL(req UploadURLRequest) (*UploadURLResponse, error) {
+	req.BaseInfo = buildBaseInfo()
+	data, err := c.do(http.MethodPost, "/ilink/bot/getuploadurl", req)
 	if err != nil {
 		return nil, err
 	}
@@ -146,39 +201,103 @@ func (c *Client) GetUploadURL(fileType int, fileSize int64) (*UploadURLResponse,
 	return &resp, nil
 }
 
-// MediaInfo holds the CDN URL and base64-encoded AES key after a successful upload
+// MediaInfo holds the protocol-native media reference after a successful upload.
 type MediaInfo struct {
-	CDNUrl string
-	AesKey string // base64-encoded AES-128 key; include verbatim in sendmessage
+	FileKey                 string
+	DownloadEncryptedQueryParam string
+	AesKey                  string // base64-encoded AES-128 key for sendmessage
+	FileSize                int64
+	FileSizeCiphertext      int64
 }
 
-// UploadMedia encrypts data with AES-128-ECB, obtains a pre-signed upload URL,
-// PUTs the encrypted bytes to the CDN, and returns the CDN URL and AES key.
-func (c *Client) UploadMedia(data []byte, fileType int) (*MediaInfo, error) {
-	encrypted, aesKey, err := EncryptMedia(data)
+func uploadBufferToCDN(httpClient *http.Client, plaintext []byte, uploadParam, fileKey string, aesKeyRaw []byte) (string, error) {
+	ciphertext, err := encryptAES128ECB(plaintext, aesKeyRaw)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	urlResp, err := c.GetUploadURL(fileType, int64(len(encrypted)))
+	cdnURL := CDNBaseURL + "/upload?encrypted_query_param=" + url.QueryEscape(uploadParam) + "&filekey=" + url.QueryEscape(fileKey)
+	req, err := http.NewRequest(http.MethodPost, cdnURL, bytes.NewReader(ciphertext))
 	if err != nil {
-		return nil, err
-	}
-	req, err := http.NewRequest(http.MethodPut, urlResp.UploadURL, bytes.NewReader(encrypted))
-	if err != nil {
-		return nil, fmt.Errorf("create upload request: %w", err)
+		return "", fmt.Errorf("create upload request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
-
-	resp, err := c.httpClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("upload: %w", err)
+		return "", fmt.Errorf("upload: %w", err)
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-		return nil, fmt.Errorf("upload failed with status %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		if len(body) > 0 {
+			return "", fmt.Errorf("upload failed with status %d: %s", resp.StatusCode, body)
+		}
+		return "", fmt.Errorf("upload failed with status %d", resp.StatusCode)
 	}
-	return &MediaInfo{CDNUrl: urlResp.CDNUrl, AesKey: aesKey}, nil
+	downloadParam := strings.TrimSpace(resp.Header.Get("x-encrypted-param"))
+	if downloadParam == "" {
+		return "", fmt.Errorf("upload response missing x-encrypted-param header")
+	}
+	return downloadParam, nil
+}
+
+func randomHex(n int) (string, error) {
+	buf := make([]byte, n)
+	if _, err := io.ReadFull(rand.Reader, buf); err != nil {
+		return "", fmt.Errorf("generate random hex: %w", err)
+	}
+	return hex.EncodeToString(buf), nil
+}
+
+// UploadMedia uploads media for a specific recipient using the protocol-native flow.
+func (c *Client) UploadMediaForUser(toUserID string, data []byte, itemType int) (*MediaInfo, error) {
+	mediaType, err := mapItemTypeToUploadMediaType(itemType)
+	if err != nil {
+		return nil, err
+	}
+	fileKey, err := randomHex(16)
+	if err != nil {
+		return nil, err
+	}
+	aesKeyRaw := make([]byte, 16)
+	if _, err := io.ReadFull(rand.Reader, aesKeyRaw); err != nil {
+		return nil, fmt.Errorf("generate aes key: %w", err)
+	}
+	rawMD5 := md5.Sum(data)
+	cipherSize := int64(len(pkcs7Pad(data, aes.BlockSize)))
+	req := UploadURLRequest{
+		FileKey:     fileKey,
+		MediaType:   mediaType,
+		ToUserID:    toUserID,
+		RawSize:     int64(len(data)),
+		RawFileMD5:  hex.EncodeToString(rawMD5[:]),
+		FileSize:    cipherSize,
+		NoNeedThumb: true,
+		AesKey:      hex.EncodeToString(aesKeyRaw),
+	}
+	urlResp, err := c.GetUploadURL(req)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(urlResp.UploadParam) == "" {
+		return nil, fmt.Errorf("getuploadurl returned empty upload_param")
+	}
+	downloadParam, err := uploadBufferToCDN(c.httpClient, data, urlResp.UploadParam, fileKey, aesKeyRaw)
+	if err != nil {
+		return nil, err
+	}
+	return &MediaInfo{
+		FileKey:                 fileKey,
+		DownloadEncryptedQueryParam: downloadParam,
+		AesKey:                  base64.StdEncoding.EncodeToString([]byte(hex.EncodeToString(aesKeyRaw))),
+		FileSize:                int64(len(data)),
+		FileSizeCiphertext:      cipherSize,
+	}, nil
+}
+
+// UploadMedia uploads media without specifying a recipient.
+// Some servers may require to_user_id; prefer UploadMediaForUser in production code.
+func (c *Client) UploadMedia(data []byte, fileType int) (*MediaInfo, error) {
+	return c.UploadMediaForUser("", data, fileType)
 }
 
 // EncryptMedia encrypts data with AES-128-ECB using a freshly generated random key.
@@ -197,11 +316,29 @@ func EncryptMedia(data []byte) (encrypted []byte, aesKey string, err error) {
 
 // DecryptMedia decrypts AES-128-ECB encrypted media using a base64-encoded key.
 func DecryptMedia(data []byte, aesKey string) ([]byte, error) {
-	key, err := base64.StdEncoding.DecodeString(aesKey)
+	key, err := parseAesKey(aesKey)
+	if err != nil {
+		return nil, err
+	}
+	return decryptAES128ECB(data, key)
+}
+
+func parseAesKey(aesKeyBase64 string) ([]byte, error) {
+	decoded, err := base64.StdEncoding.DecodeString(aesKeyBase64)
 	if err != nil {
 		return nil, fmt.Errorf("decode aes key: %w", err)
 	}
-	return decryptAES128ECB(data, key)
+	if len(decoded) == 16 {
+		return decoded, nil
+	}
+	if len(decoded) == 32 && hexKeyPattern.Match(decoded) {
+		key, err := hex.DecodeString(string(decoded))
+		if err != nil {
+			return nil, fmt.Errorf("decode hex aes key: %w", err)
+		}
+		return key, nil
+	}
+	return nil, fmt.Errorf("aes key must decode to 16 raw bytes or 32-char hex string, got %d bytes", len(decoded))
 }
 
 func encryptAES128ECB(data, key []byte) ([]byte, error) {

@@ -9,7 +9,7 @@ import (
 // UpdatesRequest is the body sent to /ilink/bot/getupdates
 type UpdatesRequest struct {
 	GetUpdatesBuf string `json:"get_updates_buf"`
-	//BaseInfo      BaseInfo `json:"base_info"`
+	BaseInfo      BaseInfo `json:"base_info"`
 }
 
 // UpdatesResponse is returned by GetUpdates
@@ -26,7 +26,7 @@ type UpdatesResponse struct {
 func (c *Client) GetUpdates(cursor string) (*UpdatesResponse, error) {
 	req := UpdatesRequest{
 		GetUpdatesBuf: cursor,
-		//BaseInfo:      BaseInfo{ChannelVersion: ChannelVersion},
+		BaseInfo:      buildBaseInfo(),
 	}
 	data, err := c.do(http.MethodPost, "/ilink/bot/getupdates", req)
 	if err != nil {

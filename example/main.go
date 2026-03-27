@@ -1,19 +1,65 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	ilink "github.com/whyy1/WeChat-iLink-Go"
 )
 
-const tokenFile = "F:\\code\\WeChat-iLink-Go\\example\\bot_token.txt"
+const tokenFileName = "bot_token.txt"
+
+const (
+	downloadDirName  = "downloads"
+	fileDirName      = "files"
+	imageDirName     = "images"
+)
+
+func exampleDir() string {
+	wd, err := os.Getwd()
+	if err == nil {
+		if filepath.Base(wd) == "example" {
+			return wd
+		}
+		candidate := filepath.Join(wd, "example")
+		if info, statErr := os.Stat(candidate); statErr == nil && info.IsDir() {
+			return candidate
+		}
+	}
+	exe, err := os.Executable()
+	if err == nil {
+		exeDir := filepath.Dir(exe)
+		if filepath.Base(exeDir) == "example" {
+			return exeDir
+		}
+	}
+	return "."
+}
+
+func tokenFilePath() string {
+	return filepath.Join(exampleDir(), tokenFileName)
+}
+
+func downloadRoot() string {
+	return filepath.Join(exampleDir(), downloadDirName)
+}
+
+func fileDownloadDir() string {
+	return filepath.Join(downloadRoot(), fileDirName)
+}
+
+func imageDownloadDir() string {
+	return filepath.Join(downloadRoot(), imageDirName)
+}
 
 func loadToken() string {
-	data, err := os.ReadFile(tokenFile)
+	data, err := os.ReadFile(tokenFilePath())
 	if err != nil {
 		return ""
 	}
@@ -21,71 +67,173 @@ func loadToken() string {
 }
 
 func saveToken(token string) {
-	if err := os.WriteFile(tokenFile, []byte(token), 0600); err != nil {
+	if err := os.WriteFile(tokenFilePath(), []byte(token), 0600); err != nil {
 		log.Printf("save token: %v", err)
 	}
 }
 
 func login() string {
-	c := ilink.NewClient("")
-	c.Debug = true
-	qr, err := c.GetBotQRCode()
+	client := ilink.NewClient("")
+	client.Debug = true
+
+	qr, err := client.GetBotQRCode()
 	if err != nil {
 		log.Fatalf("get qr code: %v", err)
 	}
-	fmt.Printf("请用微信扫码登录:\n%s\n", qr.QRCodeURL)
+	fmt.Printf("Scan with WeChat to log in:\n%s\n", qr.QRCodeURL)
 
-	token, err := c.WaitForLogin(qr.QRCode, 2*time.Second)
+	token, err := client.WaitForLogin(qr.QRCode, 2*time.Second)
 	if err != nil {
 		log.Fatalf("login: %v", err)
 	}
 	saveToken(token)
-	fmt.Printf("登录成功! bot_token 已保存到 %s\n", tokenFile)
+	fmt.Printf("Login succeeded, bot token saved to %s\n", tokenFilePath())
 	return token
+}
+
+func withTyping(bot *ilink.Client, msg ilink.Message, fn func() error) error {
+	cfg, err := bot.GetConfig(msg.FromUserID, msg.ContextToken)
+	if err != nil {
+		return err
+	}
+	if err := bot.SendTyping(msg.FromUserID, cfg.TypingTicket, ilink.TypingStatusOn); err != nil {
+		log.Printf("send typing on: %v", err)
+	}
+	defer func() {
+		if err := bot.SendTyping(msg.FromUserID, cfg.TypingTicket, ilink.TypingStatusOff); err != nil {
+			log.Printf("send typing off: %v", err)
+		}
+	}()
+	return fn()
+}
+
+func saveDownloadedData(dir, name string, data []byte) (string, error) {
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return "", fmt.Errorf("create download dir: %w", err)
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = fmt.Sprintf("received-%d.bin", time.Now().Unix())
+	}
+	savePath := filepath.Join(dir, filepath.Base(name))
+	if err := os.WriteFile(savePath, data, 0644); err != nil {
+		return "", fmt.Errorf("save downloaded data: %w", err)
+	}
+	return savePath, nil
+}
+
+func echoText(bot *ilink.Client, msg ilink.Message, item ilink.Item) error {
+	if item.TextItem == nil {
+		return errors.New("text item is nil")
+	}
+	return withTyping(bot, msg, func() error {
+		return bot.SendText(msg.FromUserID, msg.ContextToken, item.TextItem.Text)
+	})
+}
+
+func echoImage(bot *ilink.Client, msg ilink.Message, item ilink.Item) error {
+	if item.ImageItem == nil || item.ImageItem.Media == nil {
+		return errors.New("image item media is incomplete")
+	}
+
+	data, err := bot.DownloadReceivedMedia(item)
+	if err != nil {
+		return fmt.Errorf("download image: %w", err)
+	}
+	localPath, err := saveDownloadedData(imageDownloadDir(), fmt.Sprintf("received-image-%d.png", time.Now().Unix()), data)
+	if err != nil {
+		return err
+	}
+	log.Printf("image saved: %s", localPath)
+
+	return withTyping(bot, msg, func() error {
+		uploaded, err := bot.UploadMediaForUser(msg.FromUserID, data, ilink.ItemTypeImage)
+		if err != nil {
+			return fmt.Errorf("upload image: %w", err)
+		}
+		return bot.SendImageRef(msg.FromUserID, msg.ContextToken, uploaded.DownloadEncryptedQueryParam, uploaded.AesKey, int(uploaded.FileSizeCiphertext))
+	})
+}
+
+func echoFile(bot *ilink.Client, msg ilink.Message, item ilink.Item) error {
+	if item.FileItem == nil || item.FileItem.Media == nil {
+		return errors.New("file item media is incomplete")
+	}
+
+	data, err := bot.DownloadReceivedMedia(item)
+	if err != nil {
+		return fmt.Errorf("download file: %w", err)
+	}
+	fileName := strings.TrimSpace(item.FileItem.FileName)
+	localPath, err := saveDownloadedData(fileDownloadDir(), fileName, data)
+	if err != nil {
+		return err
+	}
+	log.Printf("file saved: %s", localPath)
+
+	fileSize := int64(len(data))
+	if fileSize == 0 && strings.TrimSpace(item.FileItem.Len) != "" {
+		if n, parseErr := strconv.ParseInt(strings.TrimSpace(item.FileItem.Len), 10, 64); parseErr == nil {
+			fileSize = n
+		}
+	}
+	if fileName == "" {
+		fileName = filepath.Base(localPath)
+	}
+
+	return withTyping(bot, msg, func() error {
+		uploaded, err := bot.UploadMediaForUser(msg.FromUserID, data, ilink.ItemTypeFile)
+		if err != nil {
+			return fmt.Errorf("upload file: %w", err)
+		}
+		return bot.SendFileRef(msg.FromUserID, msg.ContextToken, uploaded.DownloadEncryptedQueryParam, uploaded.AesKey, fileName, fileSize)
+	})
 }
 
 func main() {
 	token := loadToken()
 	if token == "" {
-		fmt.Println("未找到已保存的 token，开始扫码登录...")
+		fmt.Println("No saved token found. Starting QR login...")
 		token = login()
 	} else {
-		fmt.Printf("使用已保存的 token: %s\n", token)
+		fmt.Printf("Using saved token: %s\n", token)
 	}
 
 	bot := ilink.NewClient(token)
 	bot.Debug = true
-	fmt.Println("开始轮询消息 (Ctrl+C 退出)...")
+
+	fmt.Println("Polling messages. Press Ctrl+C to stop.")
+	fmt.Println("Echo behavior: text -> text, image -> image, file -> file.")
 
 	err := bot.Poll(func(msg ilink.Message) error {
-		// 只处理用户发来的消息，跳过 bot 自身的回显消息（MessageType=2）
 		if msg.MessageType != ilink.MessageTypeUser {
 			return nil
 		}
+
 		for _, item := range msg.ItemList {
-			if item.Type == ilink.ItemTypeText && item.TextItem != nil {
-				fmt.Printf("[%s] 文本: %s\n", msg.FromUserID, item.TextItem.Text)
-				cfg, err := bot.GetConfig(msg.FromUserID, msg.ContextToken)
-				if err != nil {
-					log.Printf("getconfig 失败: %v", err)
-					continue
+			var err error
+			switch item.Type {
+			case ilink.ItemTypeText:
+				err = echoText(bot, msg, item)
+			case ilink.ItemTypeImage:
+				err = echoImage(bot, msg, item)
+			case ilink.ItemTypeFile:
+				err = echoFile(bot, msg, item)
+			}
+
+			if err != nil {
+				log.Printf("echo item type=%d: %v", item.Type, err)
+				if sendErr := bot.SendText(msg.FromUserID, msg.ContextToken, "Echo failed. Check logs."); sendErr != nil {
+					log.Printf("send error notice: %v", sendErr)
 				}
-				if err = bot.SendTyping(msg.FromUserID, cfg.TypingTicket, ilink.TypingStatusOn); err != nil {
-					fmt.Println("sendtyping on err=", err)
-				}
-				time.Sleep(2 * time.Second)
-				if err := bot.SendText(msg.FromUserID, msg.ContextToken, "Echo: "+item.TextItem.Text); err != nil {
-					log.Printf("发送失败: %v", err)
-				}
-				_ = bot.SendTyping(msg.FromUserID, cfg.TypingTicket, ilink.TypingStatusOff)
 			}
 		}
 		return nil
 	})
 
 	if err != nil {
-		log.Printf("poll 错误: %v", err)
-		os.Remove(tokenFile)
-		log.Fatal("token 可能已失效，已删除缓存，请重新运行")
+		log.Printf("poll error: %v", err)
+		_ = os.Remove(tokenFilePath())
+		log.Fatal("Token may be invalid. Local cache removed; please run again.")
 	}
 }

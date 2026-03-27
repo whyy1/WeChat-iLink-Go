@@ -29,6 +29,10 @@ type Client struct {
 	Debug bool
 }
 
+func buildBaseInfo() BaseInfo {
+	return BaseInfo{ChannelVersion: ChannelVersion}
+}
+
 // NewClient creates a new iLink client.
 // Pass an empty string for botToken before login; use the token returned by WaitForLogin afterwards.
 // The bot ID (from_user_id for outbound messages) is parsed automatically from the token prefix.

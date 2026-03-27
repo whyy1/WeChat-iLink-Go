@@ -48,6 +48,8 @@ type TextItem struct {
 type MediaContent struct {
 	EncryptQueryParam string `json:"encrypt_query_param"`
 	AesKey            string `json:"aes_key"` // base64 of hex key text (redundant; use parent AesKeyHex)
+	EncryptType       int    `json:"encrypt_type,omitempty"`
+	FullURL           string `json:"full_url,omitempty"`
 }
 
 // ImageItem holds image data.
@@ -93,6 +95,7 @@ type FileItem struct {
 	// Shared
 	FileName string `json:"file_name,omitempty"`
 	FileSize int64  `json:"file_size,omitempty"`
+	Len      string `json:"len,omitempty"`
 	// Outbound
 	CDNUrl string `json:"cdn_url,omitempty"`
 	AesKey string `json:"aes_key,omitempty"`

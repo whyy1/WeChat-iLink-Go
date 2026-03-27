@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 )
 
 type sendMessageRequest struct {
-	Msg Message `json:"msg"`
+	Msg      Message  `json:"msg"`
+	BaseInfo BaseInfo `json:"base_info"`
 }
 
 type sendMessageResponse struct {
@@ -22,10 +24,10 @@ func (c *Client) SendMessage(msg Message) error {
 		msg.FromUserID = c.botID
 	}
 	msg.FromUserID = ""
-	if msg.ClientID == "" {
-		msg.ClientID = generateClientID()
-	}
-	data, err := c.do(http.MethodPost, "/ilink/bot/sendmessage", sendMessageRequest{Msg: msg})
+	//if msg.ClientID == "" {
+	msg.ClientID = generateClientID()
+	//}
+	data, err := c.do(http.MethodPost, "/ilink/bot/sendmessage", sendMessageRequest{Msg: msg, BaseInfo: buildBaseInfo()})
 	if err != nil {
 		return err
 	}
@@ -58,6 +60,23 @@ func (c *Client) SendImage(toUserID, contextToken, cdnURL, aesKey string) error 
 	})
 }
 
+// SendImageRef sends an image using the protocol-native media reference.
+func (c *Client) SendImageRef(toUserID, contextToken, encryptQueryParam, aesKey string, midSize int) error {
+	return c.SendMessage(Message{
+		ToUserID:     toUserID,
+		MessageType:  MessageTypeBot,
+		MessageState: MessageStateNormal,
+		ContextToken: contextToken,
+		ItemList: []Item{{
+			Type: ItemTypeImage,
+			ImageItem: &ImageItem{
+				Media:   &MediaContent{EncryptQueryParam: encryptQueryParam, AesKey: aesKey, EncryptType: 1},
+				MidSize: midSize,
+			},
+		}},
+	})
+}
+
 // SendFile sends a file attachment that was previously uploaded via UploadMedia.
 func (c *Client) SendFile(toUserID, contextToken, cdnURL, aesKey, fileName string, fileSize int64) error {
 	return c.SendMessage(Message{
@@ -71,6 +90,24 @@ func (c *Client) SendFile(toUserID, contextToken, cdnURL, aesKey, fileName strin
 			FileName: fileName,
 			FileSize: fileSize,
 		}}},
+	})
+}
+
+// SendFileRef sends a file using the protocol-native media reference.
+func (c *Client) SendFileRef(toUserID, contextToken, encryptQueryParam, aesKey, fileName string, fileSize int64) error {
+	return c.SendMessage(Message{
+		ToUserID:     toUserID,
+		MessageType:  MessageTypeBot,
+		MessageState: MessageStateNormal,
+		ContextToken: contextToken,
+		ItemList: []Item{{
+			Type: ItemTypeFile,
+			FileItem: &FileItem{
+				Media:    &MediaContent{EncryptQueryParam: encryptQueryParam, AesKey: aesKey, EncryptType: 1},
+				FileName: fileName,
+				Len:      strconv.FormatInt(fileSize, 10),
+			},
+		}},
 	})
 }
 

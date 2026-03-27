@@ -1,171 +1,276 @@
 # WeChat-iLink-Go
 
-A Go client library for the WeChat iLink Bot API — Tencent's official WeChat Bot protocol introduced via OpenClaw in 2026.
+`WeChat-iLink-Go` 是一个面向 Go 的微信 iLink Bot API 客户端，封装了扫码登录、长轮询收消息、发送文本/图片/文件/视频、媒体加解密与上传、输入中状态等能力。
 
-## Overview
+项目当前基于仓库内已实现的协议适配代码，而不是泛化的微信 SDK。
 
-The iLink protocol (`ilinkai.weixin.qq.com`) provides personal WeChat account bot capabilities backed by Tencent's official terms. This library covers the full workflow: QR-code login, long-poll message ingestion, text/media sending, CDN upload with AES-128-ECB encryption, and typing indicators.
+## 功能概览
 
-> API reverse-engineered from the `@tencent-weixin/openclaw-weixin` npm package (v1.0.2). See [weixin-bot-api.md](https://github.com/hao-ji-xing/openclaw-weixin/blob/main/weixin-bot-api.md) for the original analysis.
+- 扫码登录并获取 `bot_token`
+- 长轮询接收消息
+- 发送文本消息
+- 上传并发送图片、文件、视频
+- 下载并解密收到的媒体消息
+- 发送“正在输入”状态
+- 纯标准库实现 AES-128-ECB + PKCS7 媒体加解密
 
-## Installation
+## 安装
 
 ```bash
 go get github.com/whyy1/WeChat-iLink-Go
 ```
 
-## Quick Start
+要求：
+
+- Go `1.21+`
+
+## 快速开始
+
+### 1. 扫码登录
 
 ```go
+package main
+
 import (
-    "fmt"
-    "time"
-    ilink "github.com/whyy1/WeChat-iLink-Go"
+	"fmt"
+	"log"
+	"time"
+
+	ilink "github.com/whyy1/WeChat-iLink-Go"
 )
 
-// 1. Login via QR code
-c := ilink.NewClient("")
-qr, _ := c.GetBotQRCode()
-fmt.Println("Scan:", qr.QRCodeURL)
-token, _ := c.WaitForLogin(qr.QRCode, 2*time.Second)
+func main() {
+	c := ilink.NewClient("")
 
-// 2. Poll and reply
-bot := ilink.NewClient(token)
-bot.Poll(func(msg ilink.Message) error {
-    for _, item := range msg.ItemList {
-        if item.Type == ilink.ItemTypeText {
-            return bot.SendText(msg.FromUserID, msg.ContextToken, "Got: "+item.TextItem.Text)
-        }
-    }
-    return nil
-})
+	qr, err := c.GetBotQRCode()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Println("请使用微信扫码登录：")
+	fmt.Println(qr.QRCodeURL)
+
+	token, err := c.WaitForLogin(qr.QRCode, 2*time.Second)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Println("bot_token:", token)
+}
 ```
 
-A runnable echo bot is in [`example/main.go`](example/main.go).
+### 2. 接收并回复文本消息
 
-## API Reference
+```go
+package main
+
+import (
+	"log"
+
+	ilink "github.com/whyy1/WeChat-iLink-Go"
+)
+
+func main() {
+	bot := ilink.NewClient("<your-bot-token>")
+
+	err := bot.Poll(func(msg ilink.Message) error {
+		if msg.MessageType != ilink.MessageTypeUser {
+			return nil
+		}
+
+		for _, item := range msg.ItemList {
+			if item.Type == ilink.ItemTypeText && item.TextItem != nil {
+				return bot.SendText(
+					msg.FromUserID,
+					msg.ContextToken,
+					"Echo: "+item.TextItem.Text,
+				)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+## 核心 API
 
 ### Client
 
 ```go
-// NewClient creates an iLink client.
-// Pass "" before login; use the bot_token returned by WaitForLogin afterwards.
 func NewClient(botToken string) *Client
 ```
 
-All requests automatically include the required headers:
-
-| Header | Value |
-|--------|-------|
-| `Content-Type` | `application/json` |
-| `AuthorizationType` | `ilink_bot_token` |
-| `X-WECHAT-UIN` | `base64(randomUint32)` — rotated per request |
-| `Authorization` | `Bearer {bot_token}` |
-
----
-
-### Login
+- 登录前传空字符串 `""`
+- 登录成功后传 `bot_token`
+- 可选开启调试日志：
 
 ```go
-// Get a QR code to display to the user
+c := ilink.NewClient(token)
+c.Debug = true
+```
+
+### 登录
+
+```go
 func (c *Client) GetBotQRCode() (*QRCodeResponse, error)
-// qr.QRCode    — pass to GetQRCodeStatus / WaitForLogin
-// qr.QRCodeURL — URL of the QR image to display
-
-// Poll scan status once
 func (c *Client) GetQRCodeStatus(qrcode string) (*QRCodeStatus, error)
-// status.Status: 0=pending, 1=confirmed (BotToken available), 2=expired
-
-// Block until the user scans and confirms; returns bot_token
 func (c *Client) WaitForLogin(qrcode string, interval time.Duration) (string, error)
 ```
 
----
+`QRCodeStatus.Status` 的可能值：
 
-### Receiving Messages
+- `wait`
+- `confirmed`
+- `expired`
+
+### 收消息
 
 ```go
-// Long-poll once. Pass "" as cursor on the first call.
-// Always update cursor from resp.GetUpdatesBuf before the next call.
 func (c *Client) GetUpdates(cursor string) (*UpdatesResponse, error)
-
-// Convenience loop — manages the cursor internally; returns on handler error.
 func (c *Client) Poll(handler func(msg Message) error) error
 ```
 
-**Message item types:**
+说明：
 
-| Constant | Value | Description |
-|----------|-------|-------------|
-| `ItemTypeText` | 1 | Plain text (`item.TextItem.Text`) |
-| `ItemTypeImage` | 2 | Image — AES-128-ECB encrypted on CDN |
-| `ItemTypeVoice` | 3 | Voice/audio (silk codec, optional `Transcription`) |
-| `ItemTypeFile` | 4 | File attachment (`FileName`, `FileSize`) |
-| `ItemTypeVideo` | 5 | Video |
+- `GetUpdates("")` 可用于首次拉取
+- 后续请求必须使用服务端返回的 `GetUpdatesBuf`
+- `Poll` 已在内部自动维护 cursor
+- 单次长轮询超时约为 `35s`
 
-> **Critical:** Each inbound message carries a `ContextToken`. You **must** echo it back in your reply — omitting it breaks conversation threading.
-
----
-
-### Sending Messages
+### 发消息
 
 ```go
+func (c *Client) SendMessage(msg Message) error
 func (c *Client) SendText(toUserID, contextToken, text string) error
 func (c *Client) SendImage(toUserID, contextToken, cdnURL, aesKey string) error
 func (c *Client) SendFile(toUserID, contextToken, cdnURL, aesKey, fileName string, fileSize int64) error
 func (c *Client) SendVideo(toUserID, contextToken, cdnURL, aesKey string) error
-
-// Build an arbitrary message
-func (c *Client) SendMessage(msg Message) error
 ```
 
----
+注意：
 
-### Media Upload
+- 回复用户时必须带回原消息中的 `ContextToken`
+- `toUserID` 一般使用收到消息里的 `msg.FromUserID`
 
-All CDN files must be AES-128-ECB encrypted before upload. The base64-encoded key travels inside the `sendmessage` payload.
+### 输入中状态
 
 ```go
-// High-level: encrypt + get upload URL + PUT to CDN in one call
-func (c *Client) UploadMedia(data []byte, fileType int) (*MediaInfo, error)
-// media.CDNUrl — pass to SendImage / SendFile / SendVideo
-// media.AesKey — pass to SendImage / SendFile / SendVideo
+func (c *Client) GetConfig(ilinkUserID, contextToken string) (*ConfigResponse, error)
+func (c *Client) SendTyping(ilinkUserID, typingTicket string, status int) error
+```
 
-// Low-level encrypt/decrypt (standard library only, no external deps)
+示例：
+
+```go
+cfg, err := bot.GetConfig(msg.FromUserID, msg.ContextToken)
+if err != nil {
+	return err
+}
+
+_ = bot.SendTyping(msg.FromUserID, cfg.TypingTicket, ilink.TypingStatusOn)
+defer bot.SendTyping(msg.FromUserID, cfg.TypingTicket, ilink.TypingStatusOff)
+```
+
+状态常量：
+
+- `ilink.TypingStatusOn`
+- `ilink.TypingStatusOff`
+
+## 媒体上传与下载
+
+### 上传媒体
+
+```go
+func (c *Client) GetUploadURL(fileType int, fileSize int64) (*UploadURLResponse, error)
+func (c *Client) UploadMedia(data []byte, fileType int) (*MediaInfo, error)
+```
+
+`UploadMedia` 会自动完成：
+
+1. AES-128-ECB 加密原始内容
+2. 获取预签名上传地址
+3. PUT 上传到 CDN
+4. 返回 `cdn_url` 与 `aes_key`
+
+示例：
+
+```go
+media, err := bot.UploadMedia(fileBytes, ilink.ItemTypeImage)
+if err != nil {
+	return err
+}
+
+err = bot.SendImage(msg.FromUserID, msg.ContextToken, media.CDNUrl, media.AesKey)
+```
+
+### 下载媒体
+
+```go
+func (c *Client) DownloadMedia(cdnURL, aesKey string) ([]byte, error)
+func (c *Client) DownloadReceivedMedia(item Item) ([]byte, error)
 func EncryptMedia(data []byte) (encrypted []byte, aesKey string, err error)
 func DecryptMedia(data []byte, aesKey string) ([]byte, error)
-
-// Request a CDN pre-signed PUT URL
-func (c *Client) GetUploadURL(fileType int, fileSize int64) (*UploadURLResponse, error)
 ```
 
----
+使用建议：
 
-### Typing Indicator
+- 下载自己上传过的媒体，用 `DownloadMedia`
+- 下载收到的图片/语音/文件/视频，用 `DownloadReceivedMedia`
 
-```go
-cfg, err := bot.GetConfig(contextToken)  // fetch typing_ticket
-err = bot.SendTyping(cfg.TypingTicket, ilink.TypingStatusOn)
-// ... process & send reply ...
-err = bot.SendTyping(cfg.TypingTicket, ilink.TypingStatusOff)
-```
+## 主要类型与常量
 
----
+### ItemType
 
-## Protocol Notes
+- `ItemTypeText = 1`
+- `ItemTypeImage = 2`
+- `ItemTypeVoice = 3`
+- `ItemTypeFile = 4`
+- `ItemTypeVideo = 5`
 
-| Detail | Value |
-|--------|-------|
-| Base URL | `https://ilinkai.weixin.qq.com` |
-| CDN | `https://novac2c.cdn.weixin.qq.com/c2c` |
-| Long-poll hold | ≤ 35 seconds |
-| Media encryption | AES-128-ECB + PKCS7 padding |
-| User ID format | `xxx@im.wechat` |
-| Bot ID format | `xxx@im.bot` |
-| Channel version | `1.0.2` |
+### MessageType
 
-The `get_updates_buf` cursor acts as a database cursor — it **must** be updated on every `getupdates` call to prevent duplicate message delivery.
+- `MessageTypeUser = 1`
+- `MessageTypeBot = 2`
+
+### 其他常量
+
+- `MessageStateNormal = 2`
+- `ChannelVersion = "1.0.2"`
+
+## 请求头与协议细节
+
+客户端会自动附带以下请求头：
+
+- `Content-Type: application/json`
+- `AuthorizationType: ilink_bot_token`
+- `X-WECHAT-UIN: base64(randomUint32)`
+- `Authorization: Bearer {bot_token}`（登录后）
+
+协议相关常量：
+
+- Base URL: `https://ilinkai.weixin.qq.com`
+- CDN: `https://novac2c.cdn.weixin.qq.com/c2c`
+
+## 目录说明
+
+- [`client.go`](/E:/y1_code/WeChat-iLink-Go/client.go): 基础客户端与请求封装
+- [`login.go`](/E:/y1_code/WeChat-iLink-Go/login.go): 扫码登录
+- [`updates.go`](/E:/y1_code/WeChat-iLink-Go/updates.go): 长轮询收消息
+- [`send.go`](/E:/y1_code/WeChat-iLink-Go/send.go): 发消息
+- [`media.go`](/E:/y1_code/WeChat-iLink-Go/media.go): 媒体上传、下载、加解密
+- [`typing.go`](/E:/y1_code/WeChat-iLink-Go/typing.go): 输入中状态
+- [`types.go`](/E:/y1_code/WeChat-iLink-Go/types.go): 协议类型定义
+- [`example/main.go`](/E:/y1_code/WeChat-iLink-Go/example/main.go): 示例程序
+
+## 当前限制
+
+- 目前未提供会话状态持久化封装，`Poll` 重启后需要重新建立消费状态
+- 仓库内示例程序带有本地硬编码 token 文件路径，更适合作者本地调试，不建议直接照搬
+- API 与协议字段仍应以当前代码实现为准，旧文档中的部分字段和命名可能已经过时
 
 ## License
 
-Apache 2.0
+Apache-2.0
