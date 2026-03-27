@@ -10,6 +10,7 @@
 
 # Test binary, built with `go test -c`
 *.test
+*.txt
 
 # Code coverage profiles and other test artifacts
 *.out
@@ -20,6 +21,7 @@ profile.cov
 # Dependency directories (remove the comment below to include it)
 # vendor/
 
+example/bot_token.txt
 # Go workspace file
 go.work
 go.work.sum
