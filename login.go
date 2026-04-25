@@ -1,20 +1,23 @@
 package ilink
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"time"
 )
 
-// QRCodeResponse is returned by GetBotQRCode
+type LoginRequest struct {
+	PollInterval time.Duration
+}
+
 type QRCodeResponse struct {
 	baseResponse
 	QRCode    string `json:"qrcode"`
 	QRCodeURL string `json:"qrcode_img_content"`
 }
 
-// QRCodeStatus is returned by GetQRCodeStatus
 type QRCodeStatus struct {
 	baseResponse
 	Status     string `json:"status"`
@@ -24,60 +27,62 @@ type QRCodeStatus struct {
 	UserID     string `json:"ilink_user_id,omitempty"`
 }
 
-// GetBotQRCode requests a login QR code image.
-// The returned QRCode string is needed for polling GetQRCodeStatus.
-func (c *Client) GetBotQRCode() (*QRCodeResponse, error) {
-	data, err := c.do(http.MethodGet, "/ilink/bot/get_bot_qrcode?bot_type=3", nil)
-	if err != nil {
-		return nil, err
-	}
+func (c *Client) GetBotQRCode(ctx context.Context) (*QRCodeResponse, error) {
 	var resp QRCodeResponse
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return nil, fmt.Errorf("unmarshal: %w", err)
-	}
-	if err := resp.err(); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, "/ilink/bot/get_bot_qrcode?bot_type=3", nil, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
 }
 
-// GetQRCodeStatus polls the scan status of the given QR code.
-// When Status == QRCodeStatusConfirmed the BotToken field is populated.
-func (c *Client) GetQRCodeStatus(qrcode string) (*QRCodeStatus, error) {
-	data, err := c.do(http.MethodGet, "/ilink/bot/get_qrcode_status?qrcode="+qrcode, nil)
-	if err != nil {
-		return nil, err
-	}
+func (c *Client) GetQRCodeStatus(ctx context.Context, qrcode string) (*QRCodeStatus, error) {
 	var resp QRCodeStatus
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return nil, fmt.Errorf("unmarshal: %w", err)
-	}
-	if err := resp.err(); err != nil {
+	path := "/ilink/bot/get_qrcode_status?qrcode=" + url.QueryEscape(qrcode)
+	if err := c.doJSON(ctx, http.MethodGet, path, nil, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
 }
 
-// WaitForLogin polls the QR code status at interval until the user scans and confirms,
-// returning the bot_token on success. Use the token to create an authenticated Client.
-func (c *Client) WaitForLogin(qrcode string, interval time.Duration) (string, error) {
+func (c *Client) WaitForLogin(ctx context.Context, qrcode string, req LoginRequest) (string, error) {
+	interval := req.PollInterval
 	if interval <= 0 {
 		interval = 2 * time.Second
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	for range ticker.C {
-		status, err := c.GetQRCodeStatus(qrcode)
-		if err != nil {
-			return "", err
-		}
-		switch status.Status {
-		case QRCodeStatusConfirmed:
-			return status.BotToken, nil
-		case QRCodeStatusExpired:
-			return "", fmt.Errorf("QR code expired")
-			// QRCodeStatusWait: keep polling
+
+	for {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-ticker.C:
+			status, err := c.GetQRCodeStatus(ctx, qrcode)
+			if err != nil {
+				return "", err
+			}
+			switch status.Status {
+			case QRCodeStatusConfirmed:
+				return status.BotToken, nil
+			case QRCodeStatusExpired:
+				return "", fmt.Errorf("qr code expired")
+			}
 		}
 	}
-	return "", fmt.Errorf("polling stopped")
+}
+
+// Convenience wrappers matching the README public API (no context.Context).
+
+func (c *Client) GetBotQRCodeSimple() (*QRCodeResponse, error) {
+	return c.GetBotQRCode(context.Background())
+}
+
+func (c *Client) GetQRCodeStatusSimple(qrcode string) (*QRCodeStatus, error) {
+	return c.GetQRCodeStatus(context.Background(), qrcode)
+}
+
+// WaitForLoginSimple polls for QR code scan confirmation.
+// interval controls how often to check; pass 0 for the default (2s).
+func (c *Client) WaitForLoginSimple(qrcode string, interval time.Duration) (string, error) {
+	return c.WaitForLogin(context.Background(), qrcode, LoginRequest{PollInterval: interval})
 }

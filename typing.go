@@ -1,66 +1,78 @@
 package ilink
 
 import (
-	"encoding/json"
-	"fmt"
+	"context"
 	"net/http"
 )
 
-type configRequest struct {
-	IlinkUserID  string `json:"ilink_user_id"`
-	ContextToken string `json:"context_token,omitempty"`
+type GetConfigRequest struct {
+	IlinkUserID  string
+	ContextToken string
+}
+
+type SendTypingRequest struct {
+	IlinkUserID  string
+	TypingTicket string
+	Status       int
+}
+
+type getConfigEnvelope struct {
+	IlinkUserID  string   `json:"ilink_user_id"`
+	ContextToken string   `json:"context_token,omitempty"`
 	BaseInfo     BaseInfo `json:"base_info"`
 }
 
-// ConfigResponse is returned by GetConfig
+type sendTypingEnvelope struct {
+	IlinkUserID  string   `json:"ilink_user_id"`
+	TypingTicket string   `json:"typing_ticket"`
+	Status       int      `json:"status"`
+	BaseInfo     BaseInfo `json:"base_info"`
+}
+
 type ConfigResponse struct {
 	baseResponse
 	TypingTicket string `json:"typing_ticket"`
 }
 
-// GetConfig retrieves the typing_ticket for the given conversation context.
-// The ticket is required by SendTyping.
-func (c *Client) GetConfig(ilinkUserID, contextToken string) (*ConfigResponse, error) {
-	data, err := c.do(http.MethodPost, "/ilink/bot/getconfig", configRequest{IlinkUserID: ilinkUserID, ContextToken: contextToken, BaseInfo: buildBaseInfo()})
-	if err != nil {
-		return nil, err
-	}
+type typingResponse struct{ baseResponse }
+
+func (c *Client) GetConfig(ctx context.Context, req GetConfigRequest) (*ConfigResponse, error) {
 	var resp ConfigResponse
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return nil, fmt.Errorf("unmarshal: %w", err)
+	body := getConfigEnvelope{
+		IlinkUserID:  req.IlinkUserID,
+		ContextToken: req.ContextToken,
+		BaseInfo:     buildBaseInfo(),
 	}
-	if err := resp.err(); err != nil {
+	if err := c.doJSON(ctx, http.MethodPost, "/ilink/bot/getconfig", body, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
 }
 
-type typingRequest struct {
-	IlinkUserID  string `json:"ilink_user_id"`
-	TypingTicket string `json:"typing_ticket"`
-	Status       int    `json:"status"`
-	BaseInfo     BaseInfo `json:"base_info"`
+func (c *Client) SendTyping(ctx context.Context, req SendTypingRequest) error {
+	var resp typingResponse
+	body := sendTypingEnvelope{
+		IlinkUserID:  req.IlinkUserID,
+		TypingTicket: req.TypingTicket,
+		Status:       req.Status,
+		BaseInfo:     buildBaseInfo(),
+	}
+	return c.doJSON(ctx, http.MethodPost, "/ilink/bot/sendtyping", body, &resp)
 }
 
-type typingResponse struct {
-	baseResponse
+// Convenience wrappers matching the README public API (no context.Context).
+
+func (c *Client) GetConfigSimple(ilinkUserID, contextToken string) (*ConfigResponse, error) {
+	return c.GetConfig(context.Background(), GetConfigRequest{
+		IlinkUserID:  ilinkUserID,
+		ContextToken: contextToken,
+	})
 }
 
-// SendTyping transmits the typing indicator status for a conversation.
-// Use TypingStatusOn before processing and TypingStatusOff after sending the reply.
-func (c *Client) SendTyping(ilinkUserID, typingTicket string, status int) error {
-	data, err := c.do(http.MethodPost, "/ilink/bot/sendtyping", typingRequest{
+func (c *Client) SendTypingSimple(ilinkUserID, typingTicket string, status int) error {
+	return c.SendTyping(context.Background(), SendTypingRequest{
 		IlinkUserID:  ilinkUserID,
 		TypingTicket: typingTicket,
 		Status:       status,
-		BaseInfo:     buildBaseInfo(),
 	})
-	if err != nil {
-		return err
-	}
-	var resp typingResponse
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return fmt.Errorf("unmarshal: %w", err)
-	}
-	return resp.err()
 }

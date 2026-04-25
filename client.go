@@ -2,6 +2,7 @@ package ilink
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/binary"
@@ -14,45 +15,93 @@ import (
 	"time"
 )
 
-// API endpoints
 const (
-	BaseURL    = "https://ilinkai.weixin.qq.com"
-	CDNBaseURL = "https://novac2c.cdn.weixin.qq.com/c2c"
+	DefaultBaseURL    = "https://ilinkai.weixin.qq.com"
+	DefaultCDNBaseURL = "https://novac2c.cdn.weixin.qq.com/c2c"
 )
 
-// Client is the WeChat iLink bot API client
+type ClientOption func(*Client)
+
 type Client struct {
 	botToken   string
-	botID      string // parsed from token prefix, e.g. "e9546fe14322@im.bot"
+	botID      string
+	baseURL    string
+	cdnBaseURL string
 	httpClient *http.Client
-	// Debug enables printing raw request/response bodies to stderr for troubleshooting
-	Debug bool
+	Debug      bool
+}
+
+type apiResponse interface {
+	apiErr() error
+}
+
+func WithBaseURL(baseURL string) ClientOption {
+	return func(c *Client) {
+		if strings.TrimSpace(baseURL) != "" {
+			c.baseURL = strings.TrimRight(baseURL, "/")
+		}
+	}
+}
+
+func WithCDNBaseURL(cdnBaseURL string) ClientOption {
+	return func(c *Client) {
+		if strings.TrimSpace(cdnBaseURL) != "" {
+			c.cdnBaseURL = strings.TrimRight(cdnBaseURL, "/")
+		}
+	}
+}
+
+func WithHTTPClient(httpClient *http.Client) ClientOption {
+	return func(c *Client) {
+		if httpClient != nil {
+			c.httpClient = httpClient
+		}
+	}
+}
+
+func WithDebug(debug bool) ClientOption {
+	return func(c *Client) {
+		c.Debug = debug
+	}
+}
+
+func NewClient(botToken string, opts ...ClientOption) *Client {
+	botID := ""
+	if i := strings.Index(botToken, ":"); i > 0 {
+		botID = botToken[:i]
+	}
+
+	client := &Client{
+		botToken:   botToken,
+		botID:      botID,
+		baseURL:    DefaultBaseURL,
+		cdnBaseURL: DefaultCDNBaseURL,
+		httpClient: &http.Client{Timeout: 60 * time.Second},
+	}
+	for _, opt := range opts {
+		opt(client)
+	}
+	return client
 }
 
 func buildBaseInfo() BaseInfo {
 	return BaseInfo{ChannelVersion: ChannelVersion}
 }
 
-// NewClient creates a new iLink client.
-// Pass an empty string for botToken before login; use the token returned by WaitForLogin afterwards.
-// The bot ID (from_user_id for outbound messages) is parsed automatically from the token prefix.
-func NewClient(botToken string) *Client {
-	botID := ""
-	if i := strings.Index(botToken, ":"); i > 0 {
-		botID = botToken[:i]
+func decodeJSON(data []byte, out interface{}) error {
+	if err := json.Unmarshal(data, out); err != nil {
+		return fmt.Errorf("unmarshal: %w", err)
 	}
-	return &Client{
-		botToken: botToken,
-		botID:    botID,
-		httpClient: &http.Client{
-			// Longer than the 35-second long-poll timeout
-			Timeout: 60 * time.Second,
-		},
-	}
+	return nil
 }
 
-// generateClientID creates a unique message identifier required by the sendmessage API.
-// Format mirrors the reference implementation: "ilink-go:{timestamp_ms}-{random_hex}".
+func decodeAPIResponse[T apiResponse](data []byte, out T) error {
+	if err := decodeJSON(data, out); err != nil {
+		return err
+	}
+	return out.apiErr()
+}
+
 func generateClientID() string {
 	b := make([]byte, 4)
 	if _, err := rand.Read(b); err != nil {
@@ -61,8 +110,6 @@ func generateClientID() string {
 	return fmt.Sprintf("ilink-go:%d-%x", time.Now().UnixMilli(), b)
 }
 
-// generateWechatUIN builds the X-WECHAT-UIN header value.
-// The spec requires base64(String(randomUint32())) per request to prevent replay attacks.
 func generateWechatUIN() string {
 	var n uint32
 	if err := binary.Read(rand.Reader, binary.BigEndian, &n); err != nil {
@@ -71,7 +118,6 @@ func generateWechatUIN() string {
 	return base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%d", n)))
 }
 
-// buildHeaders returns the authentication headers required by every API request
 func (c *Client) buildHeaders() http.Header {
 	h := http.Header{}
 	h.Set("Content-Type", "application/json")
@@ -83,8 +129,7 @@ func (c *Client) buildHeaders() http.Header {
 	return h
 }
 
-// do executes an HTTP request against the iLink API and returns the raw response body
-func (c *Client) do(method, path string, body interface{}) ([]byte, error) {
+func (c *Client) do(ctx context.Context, method, path string, body interface{}) ([]byte, error) {
 	var reqBody io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -99,7 +144,7 @@ func (c *Client) do(method, path string, body interface{}) ([]byte, error) {
 		fmt.Fprintf(os.Stderr, "[ilink] --> %s %s\n", method, path)
 	}
 
-	req, err := http.NewRequest(method, BaseURL+path, reqBody)
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reqBody)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
@@ -108,7 +153,6 @@ func (c *Client) do(method, path string, body interface{}) ([]byte, error) {
 			req.Header.Set(k, v)
 		}
 	}
-	//fmt.Fprintf(os.Stderr, "[Header]=%s\n", req.Header)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -129,8 +173,14 @@ func (c *Client) do(method, path string, body interface{}) ([]byte, error) {
 	return data, nil
 }
 
-// baseResponse is embedded in all API response structs to surface API-level errors.
-// Different endpoints use either "ret" or "errcode" as the error field.
+func (c *Client) doJSON(ctx context.Context, method, path string, body interface{}, out apiResponse) error {
+	data, err := c.do(ctx, method, path, body)
+	if err != nil {
+		return err
+	}
+	return decodeAPIResponse(data, out)
+}
+
 type baseResponse struct {
 	Ret     int    `json:"ret"`
 	ErrCode int    `json:"errcode"`
@@ -149,4 +199,8 @@ func (r baseResponse) err() error {
 		return fmt.Errorf("api error %d", code)
 	}
 	return nil
+}
+
+func (r baseResponse) apiErr() error {
+	return r.err()
 }

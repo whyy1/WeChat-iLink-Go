@@ -7,7 +7,7 @@
 ## 功能
 
 - 扫码登录，获取并复用 `bot_token`
-- 长轮询接收消息
+- 长轮询接收消息（含自动错误恢复）
 - 发送文本消息
 - 发送图片、文件、视频
 - 下载并解密收到的图片、文件、语音、视频
@@ -23,6 +23,13 @@ go get github.com/whyy1/WeChat-iLink-Go
 要求：
 
 - Go `1.21+`
+
+## API 风格
+
+库提供两套 API：
+
+- **Context API**：每个方法接受 `context.Context` 作为首参数，支持超时和取消
+- **Simple API**：后缀为 `Simple` 的便捷方法，内部使用 `context.Background()`，签名更简洁
 
 ## 快速开始
 
@@ -42,14 +49,14 @@ import (
 func main() {
 	client := ilink.NewClient("")
 
-	qr, err := client.GetBotQRCode()
+	qr, err := client.GetBotQRCodeSimple()
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	fmt.Println(qr.QRCodeURL)
 
-	token, err := client.WaitForLogin(qr.QRCode, 2*time.Second)
+	token, err := client.WaitForLoginSimple(qr.QRCode, 2*time.Second)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -72,14 +79,14 @@ import (
 func main() {
 	bot := ilink.NewClient("<your-bot-token>")
 
-	err := bot.Poll(func(msg ilink.Message) error {
+	err := bot.PollSimple(func(msg ilink.Message) error {
 		if msg.MessageType != ilink.MessageTypeUser {
 			return nil
 		}
 
 		for _, item := range msg.ItemList {
 			if item.Type == ilink.ItemTypeText && item.TextItem != nil {
-				return bot.SendText(msg.FromUserID, msg.ContextToken, item.TextItem.Text)
+				return bot.SendTextSimple(msg.FromUserID, msg.ContextToken, item.TextItem.Text)
 			}
 		}
 		return nil
@@ -92,13 +99,14 @@ func main() {
 
 ## 示例程序
 
-示例见 [`example/main.go`](/E:/y1_code/WeChat-iLink-Go/example/main.go)。
+示例见 [`example/main.go`](example/main.go)。
 
 当前示例行为：
 
 - 文本消息：直接回显文本
 - 图片消息：先下载到 `example/downloads/images/`，再重新上传并发回
 - 文件消息：先下载到 `example/downloads/files/`，再重新上传并发回
+- 视频消息：先下载到 `example/downloads/videos/`，再重新上传并发回
 - token 缓存在 `example/bot_token.txt`
 
 ## 核心 API
@@ -106,55 +114,79 @@ func main() {
 ### Client
 
 ```go
-func NewClient(botToken string) *Client
+func NewClient(botToken string, opts ...ClientOption) *Client
 ```
 
 - 登录前传空字符串
 - 登录成功后传 `bot_token`
-- 可开启调试日志：
+
+可用选项：
 
 ```go
-bot := ilink.NewClient(token)
-bot.Debug = true
+ilink.WithBaseURL(url)       // 自定义 API 基础地址
+ilink.WithCDNBaseURL(url)    // 自定义 CDN 基础地址
+ilink.WithHTTPClient(client) // 自定义 http.Client
+ilink.WithDebug(true)        // 开启调试日志
 ```
 
 ### 登录
 
 ```go
-func (c *Client) GetBotQRCode() (*QRCodeResponse, error)
-func (c *Client) GetQRCodeStatus(qrcode string) (*QRCodeStatus, error)
-func (c *Client) WaitForLogin(qrcode string, interval time.Duration) (string, error)
+// Context API
+func (c *Client) GetBotQRCode(ctx context.Context) (*QRCodeResponse, error)
+func (c *Client) GetQRCodeStatus(ctx context.Context, qrcode string) (*QRCodeStatus, error)
+func (c *Client) WaitForLogin(ctx context.Context, qrcode string, req LoginRequest) (string, error)
+
+// Simple API
+func (c *Client) GetBotQRCodeSimple() (*QRCodeResponse, error)
+func (c *Client) GetQRCodeStatusSimple(qrcode string) (*QRCodeStatus, error)
+func (c *Client) WaitForLoginSimple(qrcode string, interval time.Duration) (string, error)
 ```
 
 二维码状态：
 
-- `wait`
-- `confirmed`
-- `expired`
+- `QRCodeStatusWait`
+- `QRCodeStatusConfirmed`
+- `QRCodeStatusExpired`
 
 ### 收消息
 
 ```go
-func (c *Client) GetUpdates(cursor string) (*UpdatesResponse, error)
-func (c *Client) Poll(handler func(msg Message) error) error
+// Context API
+func (c *Client) GetUpdates(ctx context.Context, req GetUpdatesRequest) (*UpdatesResponse, error)
+func (c *Client) Poll(ctx context.Context, handler PollHandler) error
+
+// Simple API
+func (c *Client) GetUpdatesSimple(cursor string) (*UpdatesResponse, error)
+func (c *Client) PollSimple(handler SimplePollHandler) error
 ```
 
 说明：
 
-- 首次调用可传 `""`
-- 后续应持续使用返回的 `GetUpdatesBuf`
-- `Poll` 内部已经处理了 cursor
+- `GetUpdatesRequest.Cursor` 首次调用可传 `""`，后续应持续使用返回的 `GetUpdatesBuf`
+- `Poll` 内部已处理 cursor，并对临时网络错误自动重试（最多连续 3 次，指数退避）
+- context 取消会立即返回
 
 ### 发送消息
 
 ```go
-func (c *Client) SendMessage(msg Message) error
-func (c *Client) SendText(toUserID, contextToken, text string) error
-func (c *Client) SendImage(toUserID, contextToken, cdnURL, aesKey string) error
-func (c *Client) SendFile(toUserID, contextToken, cdnURL, aesKey, fileName string, fileSize int64) error
-func (c *Client) SendVideo(toUserID, contextToken, cdnURL, aesKey string) error
-func (c *Client) SendImageRef(toUserID, contextToken, encryptQueryParam, aesKey string, midSize int) error
-func (c *Client) SendFileRef(toUserID, contextToken, encryptQueryParam, aesKey, fileName string, fileSize int64) error
+// Context API
+func (c *Client) SendMessage(ctx context.Context, req SendMessageRequest) error
+func (c *Client) SendText(ctx context.Context, req SendTextRequest) error
+func (c *Client) SendImage(ctx context.Context, req SendImageRequest) error
+func (c *Client) SendFile(ctx context.Context, req SendFileRequest) error
+func (c *Client) SendVideo(ctx context.Context, req SendVideoRequest) error
+func (c *Client) SendImageRef(ctx context.Context, toUserID, contextToken, encryptQueryParam, aesKey string, midSize int) error
+func (c *Client) SendFileRef(ctx context.Context, toUserID, contextToken, encryptQueryParam, aesKey, fileName string, fileSize int64) error
+
+// Simple API
+func (c *Client) SendMessageSimple(msg Message) error
+func (c *Client) SendTextSimple(toUserID, contextToken, text string) error
+func (c *Client) SendImageSimple(toUserID, contextToken, cdnURL, aesKey string) error
+func (c *Client) SendFileSimple(toUserID, contextToken, cdnURL, aesKey, fileName string, fileSize int64) error
+func (c *Client) SendVideoSimple(toUserID, contextToken, cdnURL, aesKey string) error
+func (c *Client) SendImageRefSimple(toUserID, contextToken, encryptQueryParam, aesKey string, midSize int) error
+func (c *Client) SendFileRefSimple(toUserID, contextToken, encryptQueryParam, aesKey, fileName string, fileSize int64) error
 ```
 
 注意：
@@ -165,8 +197,13 @@ func (c *Client) SendFileRef(toUserID, contextToken, encryptQueryParam, aesKey, 
 ### 输入中状态
 
 ```go
-func (c *Client) GetConfig(ilinkUserID, contextToken string) (*ConfigResponse, error)
-func (c *Client) SendTyping(ilinkUserID, typingTicket string, status int) error
+// Context API
+func (c *Client) GetConfig(ctx context.Context, req GetConfigRequest) (*ConfigResponse, error)
+func (c *Client) SendTyping(ctx context.Context, req SendTypingRequest) error
+
+// Simple API
+func (c *Client) GetConfigSimple(ilinkUserID, contextToken string) (*ConfigResponse, error)
+func (c *Client) SendTypingSimple(ilinkUserID, typingTicket string, status int) error
 ```
 
 常量：
@@ -179,12 +216,17 @@ func (c *Client) SendTyping(ilinkUserID, typingTicket string, status int) error
 ### 上传
 
 ```go
-func (c *Client) GetUploadURL(req UploadURLRequest) (*UploadURLResponse, error)
-func (c *Client) UploadMedia(data []byte, itemType int) (*MediaInfo, error)
-func (c *Client) UploadMediaForUser(toUserID string, data []byte, itemType int) (*MediaInfo, error)
+// Context API
+func (c *Client) GetUploadURL(ctx context.Context, req GetUploadURLRequest) (*UploadURLResponse, error)
+func (c *Client) UploadMedia(ctx context.Context, req UploadMediaRequest) (*UploadedMedia, error)
+
+// Simple API
+func (c *Client) GetUploadURLSimple(req GetUploadURLRequest) (*UploadURLResponse, error)
+func (c *Client) UploadMediaSimple(data []byte, itemType int) (*MediaInfo, error)
+func (c *Client) UploadMediaForUserSimple(toUserID string, data []byte, itemType int) (*MediaInfo, error)
 ```
 
-`UploadMediaForUser` 会执行以下流程：
+`UploadMediaForUserSimple` 会执行以下流程：
 
 1. 计算原文件大小与 MD5
 2. 生成 AES key
@@ -193,7 +235,7 @@ func (c *Client) UploadMediaForUser(toUserID string, data []byte, itemType int) 
 5. 上传到 CDN
 6. 返回 `downloadEncryptedQueryParam` 与 `aes_key`
 
-`MediaInfo` 当前包含：
+`MediaInfo` 包含：
 
 - `FileKey`
 - `DownloadEncryptedQueryParam`
@@ -204,8 +246,15 @@ func (c *Client) UploadMediaForUser(toUserID string, data []byte, itemType int) 
 ### 下载
 
 ```go
-func (c *Client) DownloadMedia(cdnURL, aesKey string) ([]byte, error)
-func (c *Client) DownloadReceivedMedia(item Item) ([]byte, error)
+// Context API
+func (c *Client) DownloadMedia(ctx context.Context, req DownloadMediaRequest) ([]byte, error)
+func (c *Client) DownloadReceivedMedia(ctx context.Context, item Item) ([]byte, error)
+
+// Simple API
+func (c *Client) DownloadMediaSimple(cdnURL, aesKey string) ([]byte, error)
+func (c *Client) DownloadReceivedMediaSimple(item Item) ([]byte, error)
+
+// 独立加解密函数
 func EncryptMedia(data []byte) (encrypted []byte, aesKey string, err error)
 func DecryptMedia(data []byte, aesKey string) ([]byte, error)
 ```
@@ -251,15 +300,15 @@ func DecryptMedia(data []byte, aesKey string) ([]byte, error)
 
 ## 文件结构
 
-- [`client.go`](/E:/y1_code/WeChat-iLink-Go/client.go): 客户端与请求封装
-- [`login.go`](/E:/y1_code/WeChat-iLink-Go/login.go): 扫码登录
-- [`updates.go`](/E:/y1_code/WeChat-iLink-Go/updates.go): 长轮询
-- [`send.go`](/E:/y1_code/WeChat-iLink-Go/send.go): 消息发送
-- [`media.go`](/E:/y1_code/WeChat-iLink-Go/media.go): 媒体上传、下载、加解密
-- [`typing.go`](/E:/y1_code/WeChat-iLink-Go/typing.go): typing 状态
-- [`types.go`](/E:/y1_code/WeChat-iLink-Go/types.go): 协议类型
-- [`example/main.go`](/E:/y1_code/WeChat-iLink-Go/example/main.go): 回显示例
-- [`weixin.md`](/E:/y1_code/WeChat-iLink-Go/weixin.md): 协议整理说明
+- [`client.go`](client.go): 客户端与请求封装
+- [`login.go`](login.go): 扫码登录
+- [`updates.go`](updates.go): 长轮询
+- [`send.go`](send.go): 消息发送
+- [`media.go`](media.go): 媒体上传、下载、加解密
+- [`typing.go`](typing.go): typing 状态
+- [`types.go`](types.go): 协议类型
+- [`example/main.go`](example/main.go): 回显示例
+- [`weixin.md`](weixin.md): 协议整理说明
 
 ## 当前限制
 

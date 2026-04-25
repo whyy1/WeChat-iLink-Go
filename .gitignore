@@ -22,10 +22,12 @@ profile.cov
 # vendor/
 
 example/bot_token.txt
+example/downloads
 # Go workspace file
 go.work
 go.work.sum
 
+CLAUDE.md
 # env file
 .env
 

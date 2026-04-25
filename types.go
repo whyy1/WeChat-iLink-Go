@@ -137,3 +137,20 @@ type Message struct {
 	ContextToken string `json:"context_token,omitempty"`
 	ItemList     []Item `json:"item_list"`
 }
+
+type UploadedMedia struct {
+	FileKey           string
+	EncryptQueryParam string
+	AesKey            string
+	PlainSize         int64
+	CipherSize        int64
+}
+
+// MediaInfo holds the result of a media upload, matching the README public API.
+type MediaInfo struct {
+	FileKey                     string
+	DownloadEncryptedQueryParam string
+	AesKey                      string
+	FileSize                    int64
+	FileSizeCiphertext          int64
+}

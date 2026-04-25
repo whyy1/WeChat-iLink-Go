@@ -16,9 +16,10 @@ import (
 const tokenFileName = "bot_token.txt"
 
 const (
-	downloadDirName  = "downloads"
-	fileDirName      = "files"
-	imageDirName     = "images"
+	downloadDirName = "downloads"
+	fileDirName     = "files"
+	imageDirName    = "images"
+	videoDirName    = "videos"
 )
 
 func exampleDir() string {
@@ -58,6 +59,10 @@ func imageDownloadDir() string {
 	return filepath.Join(downloadRoot(), imageDirName)
 }
 
+func videoDownloadDir() string {
+	return filepath.Join(downloadRoot(), videoDirName)
+}
+
 func loadToken() string {
 	data, err := os.ReadFile(tokenFilePath())
 	if err != nil {
@@ -73,16 +78,15 @@ func saveToken(token string) {
 }
 
 func login() string {
-	client := ilink.NewClient("")
-	client.Debug = true
+	client := ilink.NewClient("", ilink.WithDebug(true))
 
-	qr, err := client.GetBotQRCode()
+	qr, err := client.GetBotQRCodeSimple()
 	if err != nil {
 		log.Fatalf("get qr code: %v", err)
 	}
 	fmt.Printf("Scan with WeChat to log in:\n%s\n", qr.QRCodeURL)
 
-	token, err := client.WaitForLogin(qr.QRCode, 2*time.Second)
+	token, err := client.WaitForLoginSimple(qr.QRCode, 2*time.Second)
 	if err != nil {
 		log.Fatalf("login: %v", err)
 	}
@@ -92,15 +96,15 @@ func login() string {
 }
 
 func withTyping(bot *ilink.Client, msg ilink.Message, fn func() error) error {
-	cfg, err := bot.GetConfig(msg.FromUserID, msg.ContextToken)
+	cfg, err := bot.GetConfigSimple(msg.FromUserID, msg.ContextToken)
 	if err != nil {
 		return err
 	}
-	if err := bot.SendTyping(msg.FromUserID, cfg.TypingTicket, ilink.TypingStatusOn); err != nil {
+	if err := bot.SendTypingSimple(msg.FromUserID, cfg.TypingTicket, ilink.TypingStatusOn); err != nil {
 		log.Printf("send typing on: %v", err)
 	}
 	defer func() {
-		if err := bot.SendTyping(msg.FromUserID, cfg.TypingTicket, ilink.TypingStatusOff); err != nil {
+		if err := bot.SendTypingSimple(msg.FromUserID, cfg.TypingTicket, ilink.TypingStatusOff); err != nil {
 			log.Printf("send typing off: %v", err)
 		}
 	}()
@@ -127,7 +131,7 @@ func echoText(bot *ilink.Client, msg ilink.Message, item ilink.Item) error {
 		return errors.New("text item is nil")
 	}
 	return withTyping(bot, msg, func() error {
-		return bot.SendText(msg.FromUserID, msg.ContextToken, item.TextItem.Text)
+		return bot.SendTextSimple(msg.FromUserID, msg.ContextToken, item.TextItem.Text)
 	})
 }
 
@@ -136,7 +140,7 @@ func echoImage(bot *ilink.Client, msg ilink.Message, item ilink.Item) error {
 		return errors.New("image item media is incomplete")
 	}
 
-	data, err := bot.DownloadReceivedMedia(item)
+	data, err := bot.DownloadReceivedMediaSimple(item)
 	if err != nil {
 		return fmt.Errorf("download image: %w", err)
 	}
@@ -147,11 +151,11 @@ func echoImage(bot *ilink.Client, msg ilink.Message, item ilink.Item) error {
 	log.Printf("image saved: %s", localPath)
 
 	return withTyping(bot, msg, func() error {
-		uploaded, err := bot.UploadMediaForUser(msg.FromUserID, data, ilink.ItemTypeImage)
+		uploaded, err := bot.UploadMediaForUserSimple(msg.FromUserID, data, ilink.ItemTypeImage)
 		if err != nil {
 			return fmt.Errorf("upload image: %w", err)
 		}
-		return bot.SendImageRef(msg.FromUserID, msg.ContextToken, uploaded.DownloadEncryptedQueryParam, uploaded.AesKey, int(uploaded.FileSizeCiphertext))
+		return bot.SendImageSimple(msg.FromUserID, msg.ContextToken, uploaded.DownloadEncryptedQueryParam, uploaded.AesKey)
 	})
 }
 
@@ -160,7 +164,7 @@ func echoFile(bot *ilink.Client, msg ilink.Message, item ilink.Item) error {
 		return errors.New("file item media is incomplete")
 	}
 
-	data, err := bot.DownloadReceivedMedia(item)
+	data, err := bot.DownloadReceivedMediaSimple(item)
 	if err != nil {
 		return fmt.Errorf("download file: %w", err)
 	}
@@ -182,11 +186,35 @@ func echoFile(bot *ilink.Client, msg ilink.Message, item ilink.Item) error {
 	}
 
 	return withTyping(bot, msg, func() error {
-		uploaded, err := bot.UploadMediaForUser(msg.FromUserID, data, ilink.ItemTypeFile)
+		uploaded, err := bot.UploadMediaForUserSimple(msg.FromUserID, data, ilink.ItemTypeFile)
 		if err != nil {
 			return fmt.Errorf("upload file: %w", err)
 		}
-		return bot.SendFileRef(msg.FromUserID, msg.ContextToken, uploaded.DownloadEncryptedQueryParam, uploaded.AesKey, fileName, fileSize)
+		return bot.SendFileSimple(msg.FromUserID, msg.ContextToken, uploaded.DownloadEncryptedQueryParam, uploaded.AesKey, fileName, fileSize)
+	})
+}
+
+func echoVideo(bot *ilink.Client, msg ilink.Message, item ilink.Item) error {
+	if item.VideoItem == nil || item.VideoItem.Media == nil {
+		return errors.New("video item media is incomplete")
+	}
+
+	data, err := bot.DownloadReceivedMediaSimple(item)
+	if err != nil {
+		return fmt.Errorf("download video: %w", err)
+	}
+	localPath, err := saveDownloadedData(videoDownloadDir(), fmt.Sprintf("received-video-%d.mp4", time.Now().Unix()), data)
+	if err != nil {
+		return err
+	}
+	log.Printf("video saved: %s", localPath)
+
+	return withTyping(bot, msg, func() error {
+		uploaded, err := bot.UploadMediaForUserSimple(msg.FromUserID, data, ilink.ItemTypeVideo)
+		if err != nil {
+			return fmt.Errorf("upload video: %w", err)
+		}
+		return bot.SendVideoSimple(msg.FromUserID, msg.ContextToken, uploaded.DownloadEncryptedQueryParam, uploaded.AesKey)
 	})
 }
 
@@ -199,31 +227,32 @@ func main() {
 		fmt.Printf("Using saved token: %s\n", token)
 	}
 
-	bot := ilink.NewClient(token)
-	bot.Debug = true
+	bot := ilink.NewClient(token, ilink.WithDebug(true))
 
 	fmt.Println("Polling messages. Press Ctrl+C to stop.")
-	fmt.Println("Echo behavior: text -> text, image -> image, file -> file.")
+	fmt.Println("Echo behavior: text -> text, image -> image, file -> file, video -> video.")
 
-	err := bot.Poll(func(msg ilink.Message) error {
+	err := bot.PollSimple(func(msg ilink.Message) error {
 		if msg.MessageType != ilink.MessageTypeUser {
 			return nil
 		}
 
 		for _, item := range msg.ItemList {
 			var err error
-			switch item.Type {
+				switch item.Type {
 			case ilink.ItemTypeText:
 				err = echoText(bot, msg, item)
 			case ilink.ItemTypeImage:
 				err = echoImage(bot, msg, item)
 			case ilink.ItemTypeFile:
 				err = echoFile(bot, msg, item)
+			case ilink.ItemTypeVideo:
+				err = echoVideo(bot, msg, item)
 			}
 
 			if err != nil {
 				log.Printf("echo item type=%d: %v", item.Type, err)
-				if sendErr := bot.SendText(msg.FromUserID, msg.ContextToken, "Echo failed. Check logs."); sendErr != nil {
+				if sendErr := bot.SendTextSimple(msg.FromUserID, msg.ContextToken, "Echo failed. Check logs."); sendErr != nil {
 					log.Printf("send error notice: %v", sendErr)
 				}
 			}
