@@ -35,7 +35,11 @@ type Agent struct {
 	maxTokens      int64
 	systemPrompt   string
 	enableCommands bool
+	reminderStore  *ReminderStore
 	conversations  map[string][]anthropic.MessageParam
+	// per-call state set before executeTool
+	currentUserID       string
+	currentContextToken string
 }
 
 // NewAgent creates a new Claude Agent from the given config.
@@ -82,13 +86,22 @@ func NewAgent(cfg AgentConfig) *Agent {
 	}
 }
 
+// SetReminderStore attaches a reminder store so the set_reminder tool can schedule reminders.
+func (a *Agent) SetReminderStore(store *ReminderStore) {
+	a.reminderStore = store
+}
+
 // Chat sends a user message and runs the agentic loop until a final text response is produced.
-func (a *Agent) Chat(userID, text string) (string, error) {
-	return a.ChatWithCtx(context.Background(), userID, text)
+func (a *Agent) Chat(userID, contextToken, text string) (string, error) {
+	return a.ChatWithCtx(context.Background(), userID, contextToken, text)
 }
 
 // ChatWithCtx is like Chat but accepts a context for timeout/cancellation control.
-func (a *Agent) ChatWithCtx(ctx context.Context, userID, text string) (string, error) {
+func (a *Agent) ChatWithCtx(ctx context.Context, userID, contextToken, text string) (string, error) {
+	// Store per-call state for tool execution
+	a.currentUserID = userID
+	a.currentContextToken = contextToken
+
 	history := a.conversations[userID]
 	history = append(history, anthropic.NewUserMessage(
 		anthropic.NewTextBlock(text),
@@ -155,6 +168,29 @@ func (a *Agent) buildTools() []anthropic.ToolUnionParam {
 		},
 	})
 
+	if a.reminderStore != nil {
+		tools = append(tools, anthropic.ToolUnionParam{
+			OfTool: &anthropic.ToolParam{
+				Name:        "set_reminder",
+				Description: anthropic.String("为用户设置定时提醒。在指定分钟后提醒用户某件事。"),
+				InputSchema: anthropic.ToolInputSchemaParam{
+					Type: "object",
+					Properties: map[string]any{
+						"message": map[string]any{
+							"type":        "string",
+							"description": "提醒的内容",
+						},
+						"minutes": map[string]any{
+							"type":        "integer",
+							"description": "几分钟后提醒",
+						},
+					},
+					Required: []string{"message", "minutes"},
+				},
+			},
+		})
+	}
+
 	if a.enableCommands {
 		tools = append(tools, anthropic.ToolUnionParam{
 			OfTool: &anthropic.ToolParam{
@@ -181,6 +217,23 @@ func (a *Agent) executeTool(name string, input json.RawMessage) (string, bool) {
 	switch name {
 	case "get_current_time":
 		return time.Now().Format("2006-01-02 15:04:05 MST"), false
+	case "set_reminder":
+		var args struct {
+			Message string `json:"message"`
+			Minutes int    `json:"minutes"`
+		}
+		if err := json.Unmarshal(input, &args); err != nil {
+			return fmt.Sprintf("parse input: %v", err), true
+		}
+		if a.reminderStore == nil {
+			return "reminder store not configured", true
+		}
+		if args.Minutes <= 0 {
+			return "minutes must be positive", true
+		}
+		triggerAt := time.Now().Add(time.Duration(args.Minutes) * time.Minute)
+		id := a.reminderStore.AddReminder(a.currentUserID, a.currentContextToken, args.Message, triggerAt)
+		return fmt.Sprintf("已设置提醒：%s（%d分钟后，ID: %s）", args.Message, args.Minutes, id), false
 	case "execute_command":
 		var args struct {
 			Command string `json:"command"`

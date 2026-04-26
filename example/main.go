@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -23,6 +24,7 @@ const (
 )
 
 var agent *ilink.Agent
+var reminderStore *ilink.ReminderStore
 
 func exampleDir() string {
 	wd, err := os.Getwd()
@@ -141,7 +143,7 @@ func handleText(bot *ilink.Client, msg ilink.Message, item ilink.Item) error {
 	}
 
 	return withTyping(bot, msg, func() error {
-		reply, err := agent.Chat(msg.FromUserID, text)
+		reply, err := agent.Chat(msg.FromUserID, msg.ContextToken, text)
 		if err != nil {
 			return fmt.Errorf("agent chat: %w", err)
 		}
@@ -235,13 +237,16 @@ func echoVideo(bot *ilink.Client, msg ilink.Message, item ilink.Item) error {
 func main() {
 	apiKey := os.Getenv("ANTHROPIC_API_KEY")
 	if apiKey == "" {
-		log.Fatal("ANTHROPIC_API_KEY environment variable is required")
+		apiKey = os.Getenv("ANTHROPIC_AUTH_TOKEN")
+	}
+	if apiKey == "" {
+		log.Fatal("ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN environment variable is required")
 	}
 
-	baseURL := os.Getenv("ANTHROPIC_BASE_URL ")
-	if baseURL == "" {
-		log.Fatal("ANTHROPIC_BASE_URL environment variable is required")
-	}
+	baseURL := os.Getenv("ANTHROPIC_BASE_URL")
+	model := os.Getenv("ANTHROPIC_MODEL")
+
+	fmt.Printf("Config: APIKey=%s..., BaseURL=%q, Model=%q\n", apiKey[:8], baseURL, model)
 
 	token := loadToken()
 	if token == "" {
@@ -253,16 +258,23 @@ func main() {
 
 	bot := ilink.NewClient(token, ilink.WithDebug(true))
 
+	reminderStore = ilink.NewReminderStore()
+
 	agent = ilink.NewAgent(ilink.AgentConfig{
 		APIKey:         apiKey,
 		BaseURL:        baseURL,
-		Model:          "MiniMax-M2.7",
+		Model:          model,
 		EnableCommands: true,
 	})
+	agent.SetReminderStore(reminderStore)
+
+	// Start reminder dispatcher in background
+	go reminderStore.Start(context.Background(), bot)
 
 	fmt.Println("Polling messages. Press Ctrl+C to stop.")
 	fmt.Println("Text messages are forwarded to Claude Agent. Media messages are echoed back.")
 	fmt.Println("Send /reset to clear conversation history.")
+	fmt.Println("You can ask the bot to set reminders, e.g. '5分钟后提醒我开会'")
 
 	err := bot.PollSimple(func(msg ilink.Message) error {
 		if msg.MessageType != ilink.MessageTypeUser {
@@ -284,7 +296,7 @@ func main() {
 
 			if err != nil {
 				log.Printf("handle item type=%d: %v", item.Type, err)
-				if sendErr := bot.SendTextSimple(msg.FromUserID, msg.ContextToken, "处理失败，请查看日志。"); sendErr != nil {
+				if sendErr := bot.SendTextSimple(msg.FromUserID, msg.ContextToken, "处理失败，请查看日志。"+err.Error()); sendErr != nil {
 					log.Printf("send error notice: %v", sendErr)
 				}
 			}

@@ -34,7 +34,7 @@ func TestNewAgent(t *testing.T) {
 			SystemPrompt:   "custom prompt",
 			EnableCommands: true,
 		})
-		if a.model != "claude- 3-haiku-20240307" {
+		if a.model != "claude-3-haiku-20240307" {
 			t.Fatalf("model: got %q", a.model)
 		}
 		if a.maxTokens != 1024 {
@@ -70,39 +70,58 @@ func TestAgentResetConversation(t *testing.T) {
 }
 
 func TestBuildTools(t *testing.T) {
-	t.Run("without commands", func(t *testing.T) {
+	t.Run("without commands or reminders", func(t *testing.T) {
 		a := NewAgent(AgentConfig{APIKey: "test"})
 		tools := a.buildTools()
 		if len(tools) != 1 {
 			t.Fatalf("expected 1 tool, got %d", len(tools))
-		}
-		if tools[0].OfTool == nil {
-			t.Fatal("expected OfTool to be set")
 		}
 		if tools[0].OfTool.Name != "get_current_time" {
 			t.Fatalf("tool name: got %q", tools[0].OfTool.Name)
 		}
 	})
 
-	t.Run("with commands", func(t *testing.T) {
-		a := NewAgent(AgentConfig{APIKey: "test", EnableCommands: true})
+	t.Run("with reminder store", func(t *testing.T) {
+		a := NewAgent(AgentConfig{APIKey: "test"})
+		a.SetReminderStore(NewReminderStore())
 		tools := a.buildTools()
-		if len(tools) != 2 {
-			t.Fatalf("expected 2 tools, got %d", len(tools))
-		}
-		names := map[string]bool{}
-		for _, tool := range tools {
-			if tool.OfTool != nil {
-				names[tool.OfTool.Name] = true
-			}
+		names := toolNames(tools)
+		if !names["set_reminder"] {
+			t.Fatal("missing set_reminder tool")
 		}
 		if !names["get_current_time"] {
 			t.Fatal("missing get_current_time tool")
 		}
+	})
+
+	t.Run("with commands and reminders", func(t *testing.T) {
+		a := NewAgent(AgentConfig{APIKey: "test", EnableCommands: true})
+		a.SetReminderStore(NewReminderStore())
+		tools := a.buildTools()
+		if len(tools) != 3 {
+			t.Fatalf("expected 3 tools, got %d", len(tools))
+		}
+		names := toolNames(tools)
 		if !names["execute_command"] {
 			t.Fatal("missing execute_command tool")
 		}
+		if !names["set_reminder"] {
+			t.Fatal("missing set_reminder tool")
+		}
+		if !names["get_current_time"] {
+			t.Fatal("missing get_current_time tool")
+		}
 	})
+}
+
+func toolNames(tools []anthropic.ToolUnionParam) map[string]bool {
+	names := map[string]bool{}
+	for _, tool := range tools {
+		if tool.OfTool != nil {
+			names[tool.OfTool.Name] = true
+		}
+	}
+	return names
 }
 
 func TestExecuteTool(t *testing.T) {
@@ -159,6 +178,48 @@ func TestExecuteTool(t *testing.T) {
 		_, isErr := a2.executeTool("execute_command", json.RawMessage(`not json`))
 		if !isErr {
 			t.Fatal("expected error for invalid json")
+		}
+	})
+
+	t.Run("set_reminder without store", func(t *testing.T) {
+		a2 := NewAgent(AgentConfig{APIKey: "test"})
+		_, isErr := a2.executeTool("set_reminder", json.RawMessage(`{"message":"test","minutes":5}`))
+		if !isErr {
+			t.Fatal("expected error when no reminder store")
+		}
+	})
+
+	t.Run("set_reminder success", func(t *testing.T) {
+		a2 := NewAgent(AgentConfig{APIKey: "test"})
+		store := NewReminderStore()
+		a2.SetReminderStore(store)
+		a2.currentUserID = "user1"
+		a2.currentContextToken = "ctx_tok"
+		result, isErr := a2.executeTool("set_reminder", json.RawMessage(`{"message":"开会","minutes":5}`))
+		if isErr {
+			t.Fatalf("unexpected error: %s", result)
+		}
+		if !strings.Contains(result, "开会") {
+			t.Fatalf("result should contain reminder message: %q", result)
+		}
+		reminders := store.ListReminders("user1")
+		if len(reminders) != 1 {
+			t.Fatalf("expected 1 reminder, got %d", len(reminders))
+		}
+		if reminders[0].Message != "开会" {
+			t.Fatalf("reminder message: got %q", reminders[0].Message)
+		}
+		if reminders[0].ContextToken != "ctx_tok" {
+			t.Fatalf("reminder context_token: got %q", reminders[0].ContextToken)
+		}
+	})
+
+	t.Run("set_reminder invalid minutes", func(t *testing.T) {
+		a2 := NewAgent(AgentConfig{APIKey: "test"})
+		a2.SetReminderStore(NewReminderStore())
+		_, isErr := a2.executeTool("set_reminder", json.RawMessage(`{"message":"test","minutes":0}`))
+		if !isErr {
+			t.Fatal("expected error for zero minutes")
 		}
 	})
 }
