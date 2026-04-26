@@ -15,6 +15,7 @@ import (
 )
 
 const tokenFileName = "bot_token.txt"
+const maxMessageLen = 2048
 
 const (
 	downloadDirName = "downloads"
@@ -136,7 +137,6 @@ func handleText(bot *ilink.Client, msg ilink.Message, item ilink.Item) error {
 	}
 	text := item.TextItem.Text
 
-	// Handle /reset command to clear conversation
 	if strings.TrimSpace(text) == "/reset" {
 		agent.ResetConversation(msg.FromUserID)
 		return bot.SendTextSimple(msg.FromUserID, msg.ContextToken, "对话已重置。")
@@ -147,7 +147,7 @@ func handleText(bot *ilink.Client, msg ilink.Message, item ilink.Item) error {
 		if err != nil {
 			return fmt.Errorf("agent chat: %w", err)
 		}
-		return bot.SendTextSimple(msg.FromUserID, msg.ContextToken, reply)
+		return bot.SendTextSimple(msg.FromUserID, msg.ContextToken, ilink.TruncateText(reply, maxMessageLen))
 	})
 }
 
@@ -246,7 +246,7 @@ func main() {
 	baseURL := os.Getenv("ANTHROPIC_BASE_URL")
 	model := os.Getenv("ANTHROPIC_MODEL")
 
-	fmt.Printf("Config: APIKey=%s..., BaseURL=%q, Model=%q\n", apiKey[:8], baseURL, model)
+	fmt.Printf("Config: APIKey=%s..., BaseURL=%q, Model=%q\n", apiKey[:min(8, len(apiKey))], baseURL, model)
 
 	token := loadToken()
 	if token == "" {
@@ -268,12 +268,12 @@ func main() {
 	})
 	agent.SetReminderStore(reminderStore)
 
-	// Start reminder dispatcher in background
-	go reminderStore.Start(context.Background(), bot)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go reminderStore.Start(ctx, bot)
 
 	fmt.Println("Polling messages. Press Ctrl+C to stop.")
-	fmt.Println("Text messages are forwarded to Claude Agent. Media messages are echoed back.")
-	fmt.Println("Send /reset to clear conversation history.")
+	fmt.Println("Text -> Claude Agent | Image/File/Video -> echo | /reset -> clear history")
 	fmt.Println("You can ask the bot to set reminders, e.g. '5分钟后提醒我开会'")
 
 	err := bot.PollSimple(func(msg ilink.Message) error {
@@ -296,7 +296,8 @@ func main() {
 
 			if err != nil {
 				log.Printf("handle item type=%d: %v", item.Type, err)
-				if sendErr := bot.SendTextSimple(msg.FromUserID, msg.ContextToken, "处理失败，请查看日志。"+err.Error()); sendErr != nil {
+				errMsg := ilink.TruncateText(fmt.Sprintf("处理失败: %v", err), maxMessageLen)
+				if sendErr := bot.SendTextSimple(msg.FromUserID, msg.ContextToken, errMsg); sendErr != nil {
 					log.Printf("send error notice: %v", sendErr)
 				}
 			}

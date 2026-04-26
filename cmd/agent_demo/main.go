@@ -20,7 +20,7 @@ func main() {
 	}
 
 	baseURL := os.Getenv("ANTHROPIC_BASE_URL")
-	model := os.Getenv("ANTHROPIC_DEFAULT_SONNET_MODEL")
+	model := os.Getenv("ANTHROPIC_MODEL")
 	if model == "" {
 		model = string(ilink.DefaultAgentModel)
 	}

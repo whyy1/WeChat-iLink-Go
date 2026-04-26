@@ -38,7 +38,7 @@ func (c *Client) GetUpdates(ctx context.Context, req GetUpdatesRequest) (*Update
 	return &resp, nil
 }
 
-const maxConsecutiveErrors = 3
+const maxBackoff = 60 * time.Second
 
 func (c *Client) Poll(ctx context.Context, handler PollHandler) error {
 	cursor := ""
@@ -57,17 +57,20 @@ func (c *Client) Poll(ctx context.Context, handler PollHandler) error {
 				return ctx.Err()
 			}
 			consecutiveErrors++
-			if consecutiveErrors >= maxConsecutiveErrors {
-				return fmt.Errorf("poll failed after %d consecutive errors: %w", maxConsecutiveErrors, err)
+			// Exponential backoff: 1s, 2s, 4s, 8s, ... up to maxBackoff
+			backoff := time.Duration(1<<min(consecutiveErrors-1, 6)) * time.Second
+			if backoff > maxBackoff {
+				backoff = maxBackoff
 			}
-			backoff := time.Duration(consecutiveErrors) * time.Second
 			if c.Debug {
-				fmt.Fprintf(os.Stderr, "[ilink] poll error (%d/%d), retrying in %v: %v\n", consecutiveErrors, maxConsecutiveErrors, backoff, err)
+				fmt.Fprintf(os.Stderr, "[ilink] poll error (%d consecutive), retrying in %v: %v\n", consecutiveErrors, backoff, err)
 			}
+			timer := time.NewTimer(backoff)
 			select {
 			case <-ctx.Done():
+				timer.Stop()
 				return ctx.Err()
-			case <-time.After(backoff):
+			case <-timer.C:
 				continue
 			}
 		}

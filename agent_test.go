@@ -85,12 +85,21 @@ func TestBuildTools(t *testing.T) {
 		a := NewAgent(AgentConfig{APIKey: "test"})
 		a.SetReminderStore(NewReminderStore())
 		tools := a.buildTools()
+		if len(tools) != 4 {
+			t.Fatalf("expected 4 tools (get_current_time + 3 reminder tools), got %d", len(tools))
+		}
 		names := toolNames(tools)
+		if !names["get_current_time"] {
+			t.Fatal("missing get_current_time tool")
+		}
 		if !names["set_reminder"] {
 			t.Fatal("missing set_reminder tool")
 		}
-		if !names["get_current_time"] {
-			t.Fatal("missing get_current_time tool")
+		if !names["list_reminders"] {
+			t.Fatal("missing list_reminders tool")
+		}
+		if !names["cancel_reminder"] {
+			t.Fatal("missing cancel_reminder tool")
 		}
 	})
 
@@ -98,8 +107,8 @@ func TestBuildTools(t *testing.T) {
 		a := NewAgent(AgentConfig{APIKey: "test", EnableCommands: true})
 		a.SetReminderStore(NewReminderStore())
 		tools := a.buildTools()
-		if len(tools) != 3 {
-			t.Fatalf("expected 3 tools, got %d", len(tools))
+		if len(tools) != 5 {
+			t.Fatalf("expected 5 tools, got %d", len(tools))
 		}
 		names := toolNames(tools)
 		if !names["execute_command"] {
@@ -107,6 +116,12 @@ func TestBuildTools(t *testing.T) {
 		}
 		if !names["set_reminder"] {
 			t.Fatal("missing set_reminder tool")
+		}
+		if !names["list_reminders"] {
+			t.Fatal("missing list_reminders tool")
+		}
+		if !names["cancel_reminder"] {
+			t.Fatal("missing cancel_reminder tool")
 		}
 		if !names["get_current_time"] {
 			t.Fatal("missing get_current_time tool")
@@ -128,14 +143,14 @@ func TestExecuteTool(t *testing.T) {
 	a := NewAgent(AgentConfig{APIKey: "test"})
 
 	t.Run("get_current_time", func(t *testing.T) {
-		result, isErr := a.executeTool("get_current_time", json.RawMessage(`{}`))
+		cc := &chatContext{userID: "user1", contextToken: "ctx1"}
+		result, isErr := a.executeTool(cc, "get_current_time", json.RawMessage(`{}`))
 		if isErr {
 			t.Fatalf("unexpected error: %s", result)
 		}
 		if result == "" {
 			t.Fatal("result should not be empty")
 		}
-		// Should contain year
 		if !strings.Contains(result, "20") {
 			t.Fatalf("result should look like a datetime: %q", result)
 		}
@@ -143,7 +158,8 @@ func TestExecuteTool(t *testing.T) {
 
 	t.Run("execute_command echo", func(t *testing.T) {
 		a2 := NewAgent(AgentConfig{APIKey: "test", EnableCommands: true})
-		result, isErr := a2.executeTool("execute_command", json.RawMessage(`{"command":"echo hello"}`))
+		cc := &chatContext{userID: "user1", contextToken: "ctx1"}
+		result, isErr := a2.executeTool(cc, "execute_command", json.RawMessage(`{"command":"echo hello"}`))
 		if isErr {
 			t.Fatalf("unexpected error: %s", result)
 		}
@@ -154,17 +170,19 @@ func TestExecuteTool(t *testing.T) {
 
 	t.Run("execute_command blocked", func(t *testing.T) {
 		a2 := NewAgent(AgentConfig{APIKey: "test", EnableCommands: true})
-		result, isErr := a2.executeTool("execute_command", json.RawMessage(`{"command":"rm -rf /tmp/test"}`))
+		cc := &chatContext{userID: "user1", contextToken: "ctx1"}
+		result, isErr := a2.executeTool(cc, "execute_command", json.RawMessage(`{"command":"rm -rf /tmp/test"}`))
 		if !isErr {
 			t.Fatal("expected error for blocked command")
 		}
-		if !strings.Contains(result, "安全策略") {
-			t.Fatalf("result should mention safety: %q", result)
+		if !strings.Contains(result, "允许列表") {
+			t.Fatalf("result should mention allowlist: %q", result)
 		}
 	})
 
 	t.Run("unknown tool", func(t *testing.T) {
-		result, isErr := a.executeTool("nonexistent", json.RawMessage(`{}`))
+		cc := &chatContext{userID: "user1", contextToken: "ctx1"}
+		result, isErr := a.executeTool(cc, "nonexistent", json.RawMessage(`{}`))
 		if !isErr {
 			t.Fatal("expected error for unknown tool")
 		}
@@ -175,7 +193,8 @@ func TestExecuteTool(t *testing.T) {
 
 	t.Run("invalid input json", func(t *testing.T) {
 		a2 := NewAgent(AgentConfig{APIKey: "test", EnableCommands: true})
-		_, isErr := a2.executeTool("execute_command", json.RawMessage(`not json`))
+		cc := &chatContext{userID: "user1", contextToken: "ctx1"}
+		_, isErr := a2.executeTool(cc, "execute_command", json.RawMessage(`not json`))
 		if !isErr {
 			t.Fatal("expected error for invalid json")
 		}
@@ -183,7 +202,8 @@ func TestExecuteTool(t *testing.T) {
 
 	t.Run("set_reminder without store", func(t *testing.T) {
 		a2 := NewAgent(AgentConfig{APIKey: "test"})
-		_, isErr := a2.executeTool("set_reminder", json.RawMessage(`{"message":"test","minutes":5}`))
+		cc := &chatContext{userID: "user1", contextToken: "ctx1"}
+		_, isErr := a2.executeTool(cc, "set_reminder", json.RawMessage(`{"message":"test","minutes":5}`))
 		if !isErr {
 			t.Fatal("expected error when no reminder store")
 		}
@@ -193,9 +213,8 @@ func TestExecuteTool(t *testing.T) {
 		a2 := NewAgent(AgentConfig{APIKey: "test"})
 		store := NewReminderStore()
 		a2.SetReminderStore(store)
-		a2.currentUserID = "user1"
-		a2.currentContextToken = "ctx_tok"
-		result, isErr := a2.executeTool("set_reminder", json.RawMessage(`{"message":"开会","minutes":5}`))
+		cc := &chatContext{userID: "user1", contextToken: "ctx_tok"}
+		result, isErr := a2.executeTool(cc, "set_reminder", json.RawMessage(`{"message":"开会","minutes":5}`))
 		if isErr {
 			t.Fatalf("unexpected error: %s", result)
 		}
@@ -217,9 +236,79 @@ func TestExecuteTool(t *testing.T) {
 	t.Run("set_reminder invalid minutes", func(t *testing.T) {
 		a2 := NewAgent(AgentConfig{APIKey: "test"})
 		a2.SetReminderStore(NewReminderStore())
-		_, isErr := a2.executeTool("set_reminder", json.RawMessage(`{"message":"test","minutes":0}`))
+		cc := &chatContext{userID: "user1", contextToken: "ctx1"}
+		_, isErr := a2.executeTool(cc, "set_reminder", json.RawMessage(`{"message":"test","minutes":0}`))
 		if !isErr {
 			t.Fatal("expected error for zero minutes")
+		}
+	})
+
+	t.Run("list_reminders empty", func(t *testing.T) {
+		a2 := NewAgent(AgentConfig{APIKey: "test"})
+		a2.SetReminderStore(NewReminderStore())
+		cc := &chatContext{userID: "user1", contextToken: "ctx1"}
+		result, isErr := a2.executeTool(cc, "list_reminders", json.RawMessage(`{}`))
+		if isErr {
+			t.Fatalf("unexpected error: %s", result)
+		}
+		if !strings.Contains(result, "没有") {
+			t.Fatalf("result should mention no reminders: %q", result)
+		}
+	})
+
+	t.Run("list_reminders with items", func(t *testing.T) {
+		a2 := NewAgent(AgentConfig{APIKey: "test"})
+		store := NewReminderStore()
+		a2.SetReminderStore(store)
+		cc := &chatContext{userID: "user1", contextToken: "ctx1"}
+		a2.executeTool(cc, "set_reminder", json.RawMessage(`{"message":"测试","minutes":10}`))
+		result, isErr := a2.executeTool(cc, "list_reminders", json.RawMessage(`{}`))
+		if isErr {
+			t.Fatalf("unexpected error: %s", result)
+		}
+		if !strings.Contains(result, "测试") {
+			t.Fatalf("result should contain reminder: %q", result)
+		}
+	})
+
+	t.Run("cancel_reminder", func(t *testing.T) {
+		a2 := NewAgent(AgentConfig{APIKey: "test"})
+		store := NewReminderStore()
+		a2.SetReminderStore(store)
+		cc := &chatContext{userID: "user1", contextToken: "ctx1"}
+		setResult, _ := a2.executeTool(cc, "set_reminder", json.RawMessage(`{"message":"取消测试","minutes":5}`))
+		// Extract reminder ID from result
+		idStart := strings.Index(setResult, "ID: ")
+		if idStart == -1 {
+			t.Fatal("set_reminder result should contain 'ID: '")
+		}
+		reminderID := setResult[idStart+4:]
+		// Trim trailing "）" or ")"
+		for _, sep := range []string{"）", ")"} {
+			if idx := strings.Index(reminderID, sep); idx != -1 {
+				reminderID = reminderID[:idx]
+			}
+		}
+		reminderID = strings.TrimSpace(reminderID)
+		result, isErr := a2.executeTool(cc, "cancel_reminder", json.RawMessage(`{"reminder_id":"`+reminderID+`"}`))
+		if isErr {
+			t.Fatalf("unexpected error: %s", result)
+		}
+		if !strings.Contains(result, "已取消") {
+			t.Fatalf("result should confirm cancellation: %q", result)
+		}
+	})
+
+	t.Run("cancel_reminder not found", func(t *testing.T) {
+		a2 := NewAgent(AgentConfig{APIKey: "test"})
+		a2.SetReminderStore(NewReminderStore())
+		cc := &chatContext{userID: "user1", contextToken: "ctx1"}
+		result, isErr := a2.executeTool(cc, "cancel_reminder", json.RawMessage(`{"reminder_id":"nonexistent"}`))
+		if !isErr {
+			t.Fatal("expected error for nonexistent reminder")
+		}
+		if !strings.Contains(result, "未找到") {
+			t.Fatalf("result should mention not found: %q", result)
 		}
 	})
 }
@@ -267,6 +356,27 @@ func TestExtractText(t *testing.T) {
 	if text != "Hello World" {
 		t.Fatalf("got %q, want %q", text, "Hello World")
 	}
+}
+
+func TestTruncateText(t *testing.T) {
+	t.Run("short text", func(t *testing.T) {
+		got := TruncateText("hello", 10)
+		if got != "hello" {
+			t.Fatalf("got %q, want %q", got, "hello")
+		}
+	})
+	t.Run("exact length", func(t *testing.T) {
+		got := TruncateText("hello", 5)
+		if got != "hello" {
+			t.Fatalf("got %q, want %q", got, "hello")
+		}
+	})
+	t.Run("truncated", func(t *testing.T) {
+		got := TruncateText("hello world", 5)
+		if got != "hello..." {
+			t.Fatalf("got %q, want %q", got, "hello...")
+		}
+	})
 }
 
 func TestAgentConfigDefaults(t *testing.T) {

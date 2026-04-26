@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -18,6 +20,8 @@ const defaultModel = anthropic.ModelClaudeSonnet4_6
 // DefaultAgentModel is the default model used by Agent.
 const DefaultAgentModel = defaultModel
 
+const maxHistoryMessages = 40
+
 // AgentConfig holds configuration for creating a Claude Agent.
 type AgentConfig struct {
 	APIKey         string
@@ -26,6 +30,12 @@ type AgentConfig struct {
 	MaxTokens      int64
 	SystemPrompt   string
 	EnableCommands bool
+}
+
+// chatContext carries per-call state through the tool execution chain.
+type chatContext struct {
+	userID       string
+	contextToken string
 }
 
 // Agent wraps the Anthropic Claude API client with an agentic tool-use loop.
@@ -37,9 +47,7 @@ type Agent struct {
 	enableCommands bool
 	reminderStore  *ReminderStore
 	conversations  map[string][]anthropic.MessageParam
-	// per-call state set before executeTool
-	currentUserID       string
-	currentContextToken string
+	mu             sync.RWMutex
 }
 
 // NewAgent creates a new Claude Agent from the given config.
@@ -62,6 +70,9 @@ func NewAgent(cfg AgentConfig) *Agent {
 	client := anthropic.NewClient(opts...)
 
 	model := cfg.Model
+	if model == "" {
+		model = os.Getenv("ANTHROPIC_MODEL")
+	}
 	if model == "" {
 		model = string(defaultModel)
 	}
@@ -98,12 +109,15 @@ func (a *Agent) Chat(userID, contextToken, text string) (string, error) {
 
 // ChatWithCtx is like Chat but accepts a context for timeout/cancellation control.
 func (a *Agent) ChatWithCtx(ctx context.Context, userID, contextToken, text string) (string, error) {
-	// Store per-call state for tool execution
-	a.currentUserID = userID
-	a.currentContextToken = contextToken
+	cc := &chatContext{userID: userID, contextToken: contextToken}
 
+	a.mu.Lock()
 	history := a.conversations[userID]
-	history = append(history, anthropic.NewUserMessage(
+	historyCopy := make([]anthropic.MessageParam, len(history))
+	copy(historyCopy, history)
+	a.mu.Unlock()
+
+	working := append(historyCopy, anthropic.NewUserMessage(
 		anthropic.NewTextBlock(text),
 	))
 
@@ -116,7 +130,7 @@ func (a *Agent) ChatWithCtx(ctx context.Context, userID, contextToken, text stri
 			System: []anthropic.TextBlockParam{
 				{Text: a.systemPrompt},
 			},
-			Messages: history,
+			Messages: working,
 		}
 		if len(tools) > 0 {
 			params.Tools = tools
@@ -128,8 +142,11 @@ func (a *Agent) ChatWithCtx(ctx context.Context, userID, contextToken, text stri
 		}
 
 		if msg.StopReason != anthropic.StopReasonToolUse {
-			history = append(history, msg.ToParam())
-			a.conversations[userID] = history
+			working = append(working, msg.ToParam())
+			trimmed := trimHistory(working, maxHistoryMessages)
+			a.mu.Lock()
+			a.conversations[userID] = trimmed
+			a.mu.Unlock()
 			return extractText(msg), nil
 		}
 
@@ -139,12 +156,12 @@ func (a *Agent) ChatWithCtx(ctx context.Context, userID, contextToken, text stri
 				continue
 			}
 			toolUse := block.AsToolUse()
-			result, isErr := a.executeTool(toolUse.Name, toolUse.Input)
+			result, isErr := a.executeTool(cc, toolUse.Name, toolUse.Input)
 			toolResults = append(toolResults, anthropic.NewToolResultBlock(toolUse.ID, result, isErr))
 		}
 
-		history = append(history, msg.ToParam())
-		history = append(history, anthropic.NewUserMessage(toolResults...))
+		working = append(working, msg.ToParam())
+		working = append(working, anthropic.NewUserMessage(toolResults...))
 	}
 
 	return "", fmt.Errorf("agent loop exceeded max iterations")
@@ -152,7 +169,25 @@ func (a *Agent) ChatWithCtx(ctx context.Context, userID, contextToken, text stri
 
 // ResetConversation clears the conversation history for a user.
 func (a *Agent) ResetConversation(userID string) {
+	a.mu.Lock()
 	delete(a.conversations, userID)
+	a.mu.Unlock()
+}
+
+// GetConversationLength returns the number of messages in a user's conversation history.
+func (a *Agent) GetConversationLength(userID string) int {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return len(a.conversations[userID])
+}
+
+func trimHistory(history []anthropic.MessageParam, max int) []anthropic.MessageParam {
+	if len(history) <= max {
+		return history
+	}
+	trimmed := make([]anthropic.MessageParam, len(history)-max)
+	copy(trimmed, history[max:])
+	return trimmed
 }
 
 func (a *Agent) buildTools() []anthropic.ToolUnionParam {
@@ -189,13 +224,40 @@ func (a *Agent) buildTools() []anthropic.ToolUnionParam {
 				},
 			},
 		})
+
+		tools = append(tools, anthropic.ToolUnionParam{
+			OfTool: &anthropic.ToolParam{
+				Name:        "list_reminders",
+				Description: anthropic.String("列出用户当前所有待执行的提醒"),
+				InputSchema: anthropic.ToolInputSchemaParam{
+					Type: "object",
+				},
+			},
+		})
+
+		tools = append(tools, anthropic.ToolUnionParam{
+			OfTool: &anthropic.ToolParam{
+				Name:        "cancel_reminder",
+				Description: anthropic.String("取消一个已设置的提醒"),
+				InputSchema: anthropic.ToolInputSchemaParam{
+					Type: "object",
+					Properties: map[string]any{
+						"reminder_id": map[string]any{
+							"type":        "string",
+							"description": "要取消的提醒ID",
+						},
+					},
+					Required: []string{"reminder_id"},
+				},
+			},
+		})
 	}
 
 	if a.enableCommands {
 		tools = append(tools, anthropic.ToolUnionParam{
 			OfTool: &anthropic.ToolParam{
 				Name:        "execute_command",
-				Description: anthropic.String("执行 shell 命令并返回输出。仅允许只读/安全命令，禁止删除、修改等危险操作。"),
+				Description: anthropic.String("执行允许的 shell 命令并返回输出。仅允许安全命令。"),
 				InputSchema: anthropic.ToolInputSchemaParam{
 					Type: "object",
 					Properties: map[string]any{
@@ -213,7 +275,7 @@ func (a *Agent) buildTools() []anthropic.ToolUnionParam {
 	return tools
 }
 
-func (a *Agent) executeTool(name string, input json.RawMessage) (string, bool) {
+func (a *Agent) executeTool(cc *chatContext, name string, input json.RawMessage) (string, bool) {
 	switch name {
 	case "get_current_time":
 		return time.Now().Format("2006-01-02 15:04:05 MST"), false
@@ -232,8 +294,35 @@ func (a *Agent) executeTool(name string, input json.RawMessage) (string, bool) {
 			return "minutes must be positive", true
 		}
 		triggerAt := time.Now().Add(time.Duration(args.Minutes) * time.Minute)
-		id := a.reminderStore.AddReminder(a.currentUserID, a.currentContextToken, args.Message, triggerAt)
+		id := a.reminderStore.AddReminder(cc.userID, cc.contextToken, args.Message, triggerAt)
 		return fmt.Sprintf("已设置提醒：%s（%d分钟后，ID: %s）", args.Message, args.Minutes, id), false
+	case "list_reminders":
+		if a.reminderStore == nil {
+			return "reminder store not configured", true
+		}
+		reminders := a.reminderStore.ListReminders(cc.userID)
+		if len(reminders) == 0 {
+			return "当前没有待执行的提醒", false
+		}
+		var sb strings.Builder
+		for _, r := range reminders {
+			fmt.Fprintf(&sb, "- [%s] %s（%s触发）\n", r.ID, r.Message, r.TriggerAt.Format("15:04"))
+		}
+		return sb.String(), false
+	case "cancel_reminder":
+		var args struct {
+			ReminderID string `json:"reminder_id"`
+		}
+		if err := json.Unmarshal(input, &args); err != nil {
+			return fmt.Sprintf("parse input: %v", err), true
+		}
+		if a.reminderStore == nil {
+			return "reminder store not configured", true
+		}
+		if a.reminderStore.RemoveReminder(cc.userID, args.ReminderID) {
+			return fmt.Sprintf("已取消提醒 %s", args.ReminderID), false
+		}
+		return fmt.Sprintf("未找到提醒 %s", args.ReminderID), true
 	case "execute_command":
 		var args struct {
 			Command string `json:"command"`
@@ -247,12 +336,37 @@ func (a *Agent) executeTool(name string, input json.RawMessage) (string, bool) {
 	}
 }
 
+var allowedCommands = []string{
+	"echo", "date", "whoami", "hostname", "pwd", "ls", "dir",
+	"cat", "head", "tail", "wc", "find", "grep", "sort", "uniq",
+	"df", "du", "free", "uptime", "uname", "env", "printenv",
+	"curl", "ping", "nslookup", "ipconfig", "ifconfig",
+	"python", "python3", "node", "go version",
+	"git status", "git log", "git diff", "git branch",
+}
+
 func runCommand(cmdStr string) (string, bool) {
-	blocked := []string{"rm ", "del ", "format ", "mkfs.", "dd ", "shutdown", "reboot", "> /", "rmdir "}
-	for _, b := range blocked {
-		if len(cmdStr) >= len(b) && cmdStr[:len(b)] == b {
-			return "该命令被安全策略阻止", true
+	cmdStr = strings.TrimSpace(cmdStr)
+
+	// Extract the base command for allowlist check
+	baseCmd := cmdStr
+	if idx := strings.IndexAny(cmdStr, " \t"); idx > 0 {
+		baseCmd = cmdStr[:idx]
+	}
+	// Handle paths: extract the binary name
+	if strings.Contains(baseCmd, "/") || strings.Contains(baseCmd, "\\") {
+		baseCmd = baseCmd[strings.LastIndexAny(baseCmd, "/\\")+1:]
+	}
+
+	allowed := false
+	for _, ac := range allowedCommands {
+		if baseCmd == ac || strings.HasPrefix(cmdStr, ac+" ") {
+			allowed = true
+			break
 		}
+	}
+	if !allowed {
+		return fmt.Sprintf("命令 %q 不在允许列表中。允许的命令: %s", baseCmd, strings.Join(allowedCommands, ", ")), true
 	}
 
 	var cmd *exec.Cmd
@@ -264,6 +378,10 @@ func runCommand(cmdStr string) (string, bool) {
 
 	out, err := cmd.CombinedOutput()
 	result := string(out)
+	// Truncate large output
+	if len(result) > 2000 {
+		result = result[:2000] + "\n... (输出已截断)"
+	}
 	if err != nil {
 		if result == "" {
 			result = err.Error()
@@ -281,4 +399,12 @@ func extractText(msg *anthropic.Message) string {
 		}
 	}
 	return text
+}
+
+// TruncateText truncates text to maxLen characters, appending "..." if truncated.
+func TruncateText(text string, maxLen int) string {
+	if len(text) <= maxLen {
+		return text
+	}
+	return text[:maxLen] + "..."
 }

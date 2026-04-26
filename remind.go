@@ -49,7 +49,7 @@ func (s *ReminderStore) AddReminder(userID, contextToken, message string, trigge
 	return id
 }
 
-// ListReminders returns all pending reminders for a user.
+// ListReminders returns all pending (future) reminders for a user.
 func (s *ReminderStore) ListReminders(userID string) []Reminder {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -68,6 +68,10 @@ func (s *ReminderStore) RemoveReminder(userID, id string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	return s.removeLocked(userID, id)
+}
+
+func (s *ReminderStore) removeLocked(userID, id string) bool {
 	list := s.reminders[userID]
 	for i, r := range list {
 		if r.ID == id {
@@ -78,29 +82,9 @@ func (s *ReminderStore) RemoveReminder(userID, id string) bool {
 	return false
 }
 
-// dueReminders returns reminders that are due and removes them from the store.
-func (s *ReminderStore) dueReminders() []Reminder {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	now := time.Now()
-	var due []Reminder
-	for userID, list := range s.reminders {
-		var remaining []Reminder
-		for _, r := range list {
-			if !r.TriggerAt.After(now) {
-				due = append(due, r)
-			} else {
-				remaining = append(remaining, r)
-			}
-		}
-		s.reminders[userID] = remaining
-	}
-	return due
-}
-
 // Start launches the background dispatcher. It checks for due reminders every second
-// and sends them via the provided client. Blocks until ctx is cancelled.
+// and sends them via the provided client. Only successfully dispatched reminders are removed.
+// Blocks until ctx is cancelled.
 func (s *ReminderStore) Start(ctx context.Context, client *Client) {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
@@ -110,18 +94,39 @@ func (s *ReminderStore) Start(ctx context.Context, client *Client) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			s.dispatch(ctx, client)
+			s.dispatch(client)
 		}
 	}
 }
 
-func (s *ReminderStore) dispatch(ctx context.Context, client *Client) {
-	due := s.dueReminders()
+func (s *ReminderStore) dispatch(client *Client) {
+	s.mu.Lock()
+	due := s.peekDueLocked()
+	s.mu.Unlock()
+
 	for _, r := range due {
 		msg := fmt.Sprintf("⏰ 提醒：%s", r.Message)
 		err := client.SendTextSimple(r.UserID, r.ContextToken, msg)
 		if err != nil {
-			log.Printf("reminder dispatch failed user=%s id=%s: %v", r.UserID, r.ID, err)
+			log.Printf("reminder dispatch failed user=%s id=%s: %v (will retry)", r.UserID, r.ID, err)
+			continue
+		}
+		s.mu.Lock()
+		s.removeLocked(r.UserID, r.ID)
+		s.mu.Unlock()
+	}
+}
+
+// peekDueLocked returns due reminders without removing them. Caller must hold s.mu.
+func (s *ReminderStore) peekDueLocked() []Reminder {
+	now := time.Now()
+	var due []Reminder
+	for _, list := range s.reminders {
+		for _, r := range list {
+			if !r.TriggerAt.After(now) {
+				due = append(due, r)
+			}
 		}
 	}
+	return due
 }
