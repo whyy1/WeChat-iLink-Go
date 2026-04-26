@@ -22,6 +22,8 @@ const (
 	videoDirName    = "videos"
 )
 
+var agent *ilink.Agent
+
 func exampleDir() string {
 	wd, err := os.Getwd()
 	if err == nil {
@@ -126,12 +128,24 @@ func saveDownloadedData(dir, name string, data []byte) (string, error) {
 	return savePath, nil
 }
 
-func echoText(bot *ilink.Client, msg ilink.Message, item ilink.Item) error {
+func handleText(bot *ilink.Client, msg ilink.Message, item ilink.Item) error {
 	if item.TextItem == nil {
 		return errors.New("text item is nil")
 	}
+	text := item.TextItem.Text
+
+	// Handle /reset command to clear conversation
+	if strings.TrimSpace(text) == "/reset" {
+		agent.ResetConversation(msg.FromUserID)
+		return bot.SendTextSimple(msg.FromUserID, msg.ContextToken, "对话已重置。")
+	}
+
 	return withTyping(bot, msg, func() error {
-		return bot.SendTextSimple(msg.FromUserID, msg.ContextToken, item.TextItem.Text)
+		reply, err := agent.Chat(msg.FromUserID, text)
+		if err != nil {
+			return fmt.Errorf("agent chat: %w", err)
+		}
+		return bot.SendTextSimple(msg.FromUserID, msg.ContextToken, reply)
 	})
 }
 
@@ -219,6 +233,16 @@ func echoVideo(bot *ilink.Client, msg ilink.Message, item ilink.Item) error {
 }
 
 func main() {
+	apiKey := os.Getenv("ANTHROPIC_API_KEY")
+	if apiKey == "" {
+		log.Fatal("ANTHROPIC_API_KEY environment variable is required")
+	}
+
+	baseURL := os.Getenv("ANTHROPIC_BASE_URL ")
+	if baseURL == "" {
+		log.Fatal("ANTHROPIC_BASE_URL environment variable is required")
+	}
+
 	token := loadToken()
 	if token == "" {
 		fmt.Println("No saved token found. Starting QR login...")
@@ -229,8 +253,16 @@ func main() {
 
 	bot := ilink.NewClient(token, ilink.WithDebug(true))
 
+	agent = ilink.NewAgent(ilink.AgentConfig{
+		APIKey:         apiKey,
+		BaseURL:        baseURL,
+		Model:          "MiniMax-M2.7",
+		EnableCommands: true,
+	})
+
 	fmt.Println("Polling messages. Press Ctrl+C to stop.")
-	fmt.Println("Echo behavior: text -> text, image -> image, file -> file, video -> video.")
+	fmt.Println("Text messages are forwarded to Claude Agent. Media messages are echoed back.")
+	fmt.Println("Send /reset to clear conversation history.")
 
 	err := bot.PollSimple(func(msg ilink.Message) error {
 		if msg.MessageType != ilink.MessageTypeUser {
@@ -239,9 +271,9 @@ func main() {
 
 		for _, item := range msg.ItemList {
 			var err error
-				switch item.Type {
+			switch item.Type {
 			case ilink.ItemTypeText:
-				err = echoText(bot, msg, item)
+				err = handleText(bot, msg, item)
 			case ilink.ItemTypeImage:
 				err = echoImage(bot, msg, item)
 			case ilink.ItemTypeFile:
@@ -251,8 +283,8 @@ func main() {
 			}
 
 			if err != nil {
-				log.Printf("echo item type=%d: %v", item.Type, err)
-				if sendErr := bot.SendTextSimple(msg.FromUserID, msg.ContextToken, "Echo failed. Check logs."); sendErr != nil {
+				log.Printf("handle item type=%d: %v", item.Type, err)
+				if sendErr := bot.SendTextSimple(msg.FromUserID, msg.ContextToken, "处理失败，请查看日志。"); sendErr != nil {
 					log.Printf("send error notice: %v", sendErr)
 				}
 			}
