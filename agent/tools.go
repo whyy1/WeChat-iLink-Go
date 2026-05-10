@@ -21,7 +21,7 @@ var DefaultAllowedCommands = []string{
 	"git status", "git log", "git diff", "git branch",
 }
 
-func BuiltinTools(reminders ReminderStore, enableCommands bool) []Tool {
+func BuiltinTools(reminders ReminderStore, enableCommands bool, workDir string) []Tool {
 	tools := []Tool{{
 		Name:        "get_current_time",
 		Description: "获取当前日期和时间",
@@ -35,7 +35,7 @@ func BuiltinTools(reminders ReminderStore, enableCommands bool) []Tool {
 		tools = append(tools, reminderTools(reminders)...)
 	}
 	if enableCommands {
-		tools = append(tools, commandTool())
+		tools = append(tools, commandTool(workDir))
 	}
 	return tools
 }
@@ -111,7 +111,7 @@ func reminderTools(reminders ReminderStore) []Tool {
 	}
 }
 
-func commandTool() Tool {
+func commandTool(workDir string) Tool {
 	return Tool{
 		Name:        "execute_command",
 		Description: "执行允许的 shell 命令并返回输出。仅允许安全命令。",
@@ -129,13 +129,13 @@ func commandTool() Tool {
 			if err := json.Unmarshal(call.Input, &args); err != nil {
 				return ToolResult{Content: fmt.Sprintf("parse input: %v", err), IsError: true}
 			}
-			content, isErr := RunCommand(ctx, args.Command, DefaultAllowedCommands)
+			content, isErr := RunCommand(ctx, args.Command, DefaultAllowedCommands, workDir)
 			return ToolResult{Content: content, IsError: isErr}
 		},
 	}
 }
 
-func RunCommand(ctx context.Context, cmdStr string, allowedCommands []string) (string, bool) {
+func RunCommand(ctx context.Context, cmdStr string, allowedCommands []string, workDir string) (string, bool) {
 	cmdStr = strings.TrimSpace(cmdStr)
 	baseCmd := cmdStr
 	if idx := strings.IndexAny(cmdStr, " \t"); idx > 0 {
@@ -168,6 +168,9 @@ func RunCommand(ctx context.Context, cmdStr string, allowedCommands []string) (s
 		cmd = exec.CommandContext(commandCtx, "cmd", "/c", cmdStr)
 	} else {
 		cmd = exec.CommandContext(commandCtx, "sh", "-c", cmdStr)
+	}
+	if workDir != "" {
+		cmd.Dir = workDir
 	}
 
 	out, err := cmd.CombinedOutput()

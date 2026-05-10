@@ -55,7 +55,7 @@ func (s *fakeReminderStore) RemoveReminder(userID, id string) bool {
 }
 
 func TestBuiltinToolsNoRemindersNoCommands(t *testing.T) {
-	tools := BuiltinTools(nil, false)
+	tools := BuiltinTools(nil, false, "")
 	if len(tools) != 1 {
 		t.Fatalf("expected 1 tool, got %d", len(tools))
 	}
@@ -66,7 +66,7 @@ func TestBuiltinToolsNoRemindersNoCommands(t *testing.T) {
 
 func TestBuiltinToolsWithReminders(t *testing.T) {
 	store := newFakeReminderStore()
-	tools := BuiltinTools(store, false)
+	tools := BuiltinTools(store, false, "")
 	if len(tools) != 4 {
 		t.Fatalf("expected 4 tools, got %d", len(tools))
 	}
@@ -84,7 +84,7 @@ func TestBuiltinToolsWithReminders(t *testing.T) {
 
 func TestBuiltinToolsWithRemindersAndCommands(t *testing.T) {
 	store := newFakeReminderStore()
-	tools := BuiltinTools(store, true)
+	tools := BuiltinTools(store, true, "")
 	if len(tools) != 5 {
 		t.Fatalf("expected 5 tools, got %d", len(tools))
 	}
@@ -98,7 +98,7 @@ func TestBuiltinToolsWithRemindersAndCommands(t *testing.T) {
 }
 
 func TestToolGetCurrentTime(t *testing.T) {
-	tools := BuiltinTools(nil, false)
+	tools := BuiltinTools(nil, false, "")
 	handler := tools[0].Handler
 	result := handler(context.Background(), ToolCall{})
 	if result.IsError {
@@ -111,7 +111,7 @@ func TestToolGetCurrentTime(t *testing.T) {
 
 func TestToolSetReminderSuccess(t *testing.T) {
 	store := newFakeReminderStore()
-	tools := BuiltinTools(store, false)
+	tools := BuiltinTools(store, false, "")
 	var setReminderHandler ToolHandler
 	for _, tool := range tools {
 		if tool.Name == "set_reminder" {
@@ -139,7 +139,7 @@ func TestToolSetReminderSuccess(t *testing.T) {
 
 func TestToolSetReminderInvalidMinutes(t *testing.T) {
 	store := newFakeReminderStore()
-	tools := BuiltinTools(store, false)
+	tools := BuiltinTools(store, false, "")
 	var setReminderHandler ToolHandler
 	for _, tool := range tools {
 		if tool.Name == "set_reminder" {
@@ -161,7 +161,7 @@ func TestToolSetReminderInvalidMinutes(t *testing.T) {
 
 func TestToolSetReminderInvalidJSON(t *testing.T) {
 	store := newFakeReminderStore()
-	tools := BuiltinTools(store, false)
+	tools := BuiltinTools(store, false, "")
 	var setReminderHandler ToolHandler
 	for _, tool := range tools {
 		if tool.Name == "set_reminder" {
@@ -183,7 +183,7 @@ func TestToolSetReminderInvalidJSON(t *testing.T) {
 
 func TestToolListRemindersEmpty(t *testing.T) {
 	store := newFakeReminderStore()
-	tools := BuiltinTools(store, false)
+	tools := BuiltinTools(store, false, "")
 	var listHandler ToolHandler
 	for _, tool := range tools {
 		if tool.Name == "list_reminders" {
@@ -203,7 +203,7 @@ func TestToolListRemindersEmpty(t *testing.T) {
 
 func TestToolCancelReminderNotFound(t *testing.T) {
 	store := newFakeReminderStore()
-	tools := BuiltinTools(store, false)
+	tools := BuiltinTools(store, false, "")
 	var cancelHandler ToolHandler
 	for _, tool := range tools {
 		if tool.Name == "cancel_reminder" {
@@ -223,7 +223,7 @@ func TestToolCancelReminderNotFound(t *testing.T) {
 }
 
 func TestRunCommandSafe(t *testing.T) {
-	result, isErr := RunCommand(context.Background(), "echo ok", DefaultAllowedCommands)
+	result, isErr := RunCommand(context.Background(), "echo ok", DefaultAllowedCommands, "")
 	if isErr {
 		t.Fatalf("unexpected error: %s", result)
 	}
@@ -233,7 +233,7 @@ func TestRunCommandSafe(t *testing.T) {
 }
 
 func TestRunCommandBlocked(t *testing.T) {
-	_, isErr := RunCommand(context.Background(), "rm -rf /tmp/test", DefaultAllowedCommands)
+	_, isErr := RunCommand(context.Background(), "rm -rf /tmp/test", DefaultAllowedCommands, "")
 	if !isErr {
 		t.Fatal("expected error for blocked command")
 	}
@@ -247,7 +247,7 @@ func TestRunCommandBlockedVariations(t *testing.T) {
 		"mkfs.ext4 /dev/sda",
 	}
 	for _, cmd := range blocked {
-		_, isErr := RunCommand(context.Background(), cmd, DefaultAllowedCommands)
+		_, isErr := RunCommand(context.Background(), cmd, DefaultAllowedCommands, "")
 		if !isErr {
 			t.Fatalf("command %q should be blocked", cmd)
 		}
@@ -258,7 +258,7 @@ func TestRunCommandContextTimeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Millisecond)
 	defer cancel()
 	// Sleep longer than timeout.
-	_, isErr := RunCommand(ctx, "sleep 10", []string{"sleep"})
+	_, isErr := RunCommand(ctx, "sleep 10", []string{"sleep"}, "")
 	if !isErr {
 		t.Fatal("expected error for timed out command")
 	}

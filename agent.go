@@ -35,6 +35,10 @@ type AgentConfig struct {
 	SystemPrompt   string
 	EnableCommands bool
 
+	// WorkDir is the working directory for the execute_command tool.
+	// Commands run in this directory. If empty, the process working directory is used.
+	WorkDir string
+
 	// Claude Code CLI configuration.
 	ClaudeCodeCommand      string
 	ClaudeCodeModel        string
@@ -45,10 +49,11 @@ type AgentConfig struct {
 
 // Agent wraps a provider-neutral backend with compatibility for existing callers.
 type Agent struct {
-	agent        *agent.Agent
-	backend      agent.Backend
+	agent          *agent.Agent
+	backend        agent.Backend
 	enableCommands bool
-	reminderStore *ReminderStore
+	workDir        string
+	reminderStore  *ReminderStore
 }
 
 // NewAgent creates a new Agent from the given config.
@@ -73,7 +78,7 @@ func NewAgent(cfg AgentConfig) *Agent {
 
 	// Build builtin tools based on config.
 	// Note: tools are set after backend creation for Anthropic backend.
-	tools := builtinTools(cfg.EnableCommands)
+	tools := builtinTools(cfg.EnableCommands, cfg.WorkDir)
 	backendCfg.Tools = tools
 
 	backend, err := factory.NewBackend(backendCfg)
@@ -88,6 +93,7 @@ func NewAgent(cfg AgentConfig) *Agent {
 		agent:          agent.New(backend),
 		backend:        backend,
 		enableCommands: cfg.EnableCommands,
+		workDir:        cfg.WorkDir,
 	}
 }
 
@@ -95,7 +101,7 @@ func NewAgent(cfg AgentConfig) *Agent {
 func (a *Agent) SetReminderStore(store *ReminderStore) {
 	a.reminderStore = store
 	// Rebuild tools with reminder store.
-	tools := builtinToolsWithReminders(a.enableCommands, store)
+	tools := builtinToolsWithReminders(a.enableCommands, store, a.workDir)
 	a.agent.SetTools(tools)
 }
 
@@ -153,14 +159,14 @@ func TruncateText(text string, maxLen int) string {
 	return agent.TruncateText(text, maxLen)
 }
 
-func builtinTools(enableCommands bool) []agent.Tool {
-	return agent.BuiltinTools(nil, enableCommands)
+func builtinTools(enableCommands bool, workDir string) []agent.Tool {
+	return agent.BuiltinTools(nil, enableCommands, workDir)
 }
 
-func builtinToolsWithReminders(enableCommands bool, store *ReminderStore) []agent.Tool {
+func builtinToolsWithReminders(enableCommands bool, store *ReminderStore, workDir string) []agent.Tool {
 	if store == nil {
-		return agent.BuiltinTools(nil, enableCommands)
+		return agent.BuiltinTools(nil, enableCommands, workDir)
 	}
 	adapter := &reminderStoreAdapter{store: store}
-	return agent.BuiltinTools(adapter, enableCommands)
+	return agent.BuiltinTools(adapter, enableCommands, workDir)
 }
