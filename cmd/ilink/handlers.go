@@ -158,7 +158,8 @@ func ensureToken(cfg *config.Config, configPath string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("get qr code: %w", err)
 	}
-	fmt.Printf("Scan with WeChat to log in:\n%s\n", qr.QRCodeURL)
+	fmt.Println("Scan with WeChat to log in:")
+	_ = printQRCode(qr.QRCodeURL)
 	token, err := client.WaitForLoginSimple(qr.QRCode, 2*time.Second)
 	if err != nil {
 		return "", fmt.Errorf("login: %w", err)

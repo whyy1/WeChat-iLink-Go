@@ -104,7 +104,8 @@ func runInteractiveSetup(configPath string) {
 		fmt.Fprintf(os.Stderr, "Error getting QR code: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("Please scan the QR code:\n%s\n", qrResp.QRCodeURL)
+	fmt.Println("Please scan the QR code:")
+	_ = printQRCode(qrResp.QRCodeURL)
 	fmt.Println("Waiting for scan confirmation...")
 
 	token, err := loginClient.WaitForLoginSimple(qrResp.QRCode, 2*time.Second)
