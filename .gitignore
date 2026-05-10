@@ -26,6 +26,7 @@ example/downloads
 # Go workspace file
 go.work
 go.work.sum
+.idea
 
 CLAUDE.md
 # env file
